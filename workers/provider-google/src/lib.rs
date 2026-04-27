@@ -43,7 +43,7 @@ pub enum GoogleError {
 }
 
 /// Configuration for a single Gemini streaming call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GoogleConfig {
     pub api_key: String,
     pub model: String,
@@ -531,6 +531,12 @@ fn build_content(state: &PartialState) -> Vec<ContentBlock> {
         });
     }
     content
+}
+
+/// Register `provider::google::stream` on the iii bus.
+pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
+    provider_base::register_provider_stream::<GoogleConfig, _, _>(iii, PROVIDER_NAME, stream);
+    Ok(())
 }
 
 /// Convenience: collect a stream into a final `AssistantMessage`.

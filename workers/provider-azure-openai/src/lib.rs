@@ -38,7 +38,7 @@ pub enum AzureOpenAIError {
 }
 
 /// Configuration for a single Azure Responses API streaming call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AzureOpenAIConfig {
     pub api_key: String,
     /// Resource name (subdomain). Combined as `https://<resource>.openai.azure.com`.
@@ -577,6 +577,12 @@ fn build_partial(state: &PartialState, model: &str) -> AssistantMessage {
 
 fn build_final(state: &PartialState, model: &str) -> AssistantMessage {
     build_partial(state, model)
+}
+
+/// Register `provider::azure-openai::stream` on the iii bus.
+pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
+    provider_base::register_provider_stream::<AzureOpenAIConfig, _, _>(iii, PROVIDER_NAME, stream);
+    Ok(())
 }
 
 /// Convenience: collect a stream into a final `AssistantMessage`.

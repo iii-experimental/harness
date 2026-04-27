@@ -13,9 +13,11 @@
 //!   HuggingFace, Vercel AI Gateway, OpenCode Zen, OpenCode Go).
 
 pub mod errors;
+pub mod iii_register;
 pub mod openai_compat;
 pub mod sse;
 
 pub use errors::{classify_provider_error, error_event};
+pub use iii_register::register_provider_stream;
 pub use openai_compat::{stream_chat_completions, ChatCompletionsConfig, OpenAICompatRequest};
 pub use sse::{parse_sse_block, sanitize_surrogates};

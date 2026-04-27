@@ -5,13 +5,15 @@
 //! `stream` and observes the deterministic output.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use async_trait::async_trait;
 use harness_types::{
     AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason, TextContent,
 };
+use iii_sdk::{IIIError, RegisterFunctionMessage, III};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// One canned response keyed by a stable string. Test setup builds the map.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +117,47 @@ pub fn text_only(text: &str, model: &str, provider: &str, timestamp: i64) -> Can
         message: final_message,
         events,
     }
+}
+
+/// Process-wide [`FauxProvider`] used by [`register_with_iii`]. Tests install
+/// canned responses via [`shared_provider`] before driving the iii function.
+fn shared_provider() -> &'static FauxProvider {
+    static GLOBAL: OnceLock<FauxProvider> = OnceLock::new();
+    GLOBAL.get_or_init(FauxProvider::new)
+}
+
+/// Convenience: install a canned response on the shared provider used by the
+/// iii-registered `provider::faux::stream` function.
+pub fn register_canned(key: impl Into<String>, response: CannedResponse) {
+    shared_provider().register(key, response);
+}
+
+/// Register `provider::faux::stream` on the iii bus.
+///
+/// The handler accepts `{ key }` and returns
+/// `{ events: [<AssistantMessageEvent>...] }` from the shared
+/// [`FauxProvider`]. Faux deviates from the standard provider shape because
+/// it has no `(config, system_prompt, messages, tools)` surface — the reply
+/// is keyed by an opaque test fixture identifier.
+pub async fn register_with_iii(iii: &III) -> anyhow::Result<()> {
+    iii.register_function((
+        RegisterFunctionMessage::with_id("provider::faux::stream".to_string())
+            .with_description("Replay a canned faux provider response keyed by `key`".to_string()),
+        move |payload: Value| async move {
+            let key = payload
+                .get("key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| IIIError::Handler("missing required field: key".into()))?
+                .to_string();
+            let events = shared_provider()
+                .stream(&key)
+                .await
+                .map_err(|e| IIIError::Handler(e.to_string()))?;
+            serde_json::to_value(serde_json::json!({ "events": events }))
+                .map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    ));
+    Ok(())
 }
 
 #[cfg(test)]

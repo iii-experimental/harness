@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 harness-types = { path = "../harness-types" }
 overflow-classify = { path = "../overflow-classify" }
+iii-sdk = { workspace = true }
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

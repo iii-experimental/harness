@@ -27,7 +27,7 @@ pub enum AnthropicError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnthropicConfig {
     pub api_key: String,
     pub model: String,
@@ -493,6 +493,16 @@ fn build_content(state: &PartialState) -> Vec<ContentBlock> {
         });
     }
     content
+}
+
+/// Register `provider::anthropic::stream` on the iii bus.
+///
+/// The handler decodes `{ config, system_prompt, messages, tools }`, calls
+/// [`stream`], drains the resulting event stream, and returns
+/// `{ events: [<AssistantMessageEvent>...] }`.
+pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
+    provider_base::register_provider_stream::<AnthropicConfig, _, _>(iii, "anthropic", stream);
+    Ok(())
 }
 
 /// Convenience: collect a stream into a final AssistantMessage.

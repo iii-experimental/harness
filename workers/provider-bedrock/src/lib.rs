@@ -31,7 +31,7 @@ pub const PROVIDER_NAME: &str = "bedrock";
 pub const DEFAULT_REGION: &str = "us-east-1";
 
 /// Configuration for a single Bedrock Converse call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BedrockConfig {
     /// Bedrock model id, e.g. `anthropic.claude-3-5-sonnet-20240620-v1:0`.
     pub model_id: String,
@@ -107,6 +107,12 @@ async fn stream_inner(
             PROVIDER_NAME,
         ))
         .await;
+}
+
+/// Register `provider::bedrock::stream` on the iii bus.
+pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
+    provider_base::register_provider_stream::<BedrockConfig, _, _>(iii, PROVIDER_NAME, stream);
+    Ok(())
 }
 
 /// Convenience: collect a stream into a final `AssistantMessage`.

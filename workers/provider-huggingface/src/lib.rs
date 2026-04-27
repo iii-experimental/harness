@@ -11,7 +11,7 @@ use tokio_stream::StreamExt;
 const API_URL: &str = "https://api-inference.huggingface.co/v1/chat/completions";
 const PROVIDER_NAME: &str = "huggingface";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HuggingFaceConfig {
     pub api_key: String,
     pub model: String,
@@ -48,6 +48,12 @@ pub async fn stream(
         tools,
     };
     stream_chat_completions(Arc::new(base), req).await
+}
+
+/// Register `provider::huggingface::stream` on the iii bus.
+pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
+    provider_base::register_provider_stream::<HuggingFaceConfig, _, _>(iii, PROVIDER_NAME, stream);
+    Ok(())
 }
 
 pub async fn collect(mut stream: ReceiverStream<AssistantMessageEvent>) -> AssistantMessage {

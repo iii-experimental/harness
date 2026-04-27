@@ -11,7 +11,7 @@ const API_URL: &str = "https://api.cerebras.ai/v1/chat/completions";
 const PROVIDER_NAME: &str = "cerebras";
 const ENV_VAR: &str = "CEREBRAS_API_KEY";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CerebrasConfig {
     pub api_key: String,
     pub model: String,
@@ -48,6 +48,12 @@ pub async fn stream(
         tools,
     };
     stream_chat_completions(Arc::new(base), req).await
+}
+
+/// Register `provider::cerebras::stream` on the iii bus.
+pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
+    provider_base::register_provider_stream::<CerebrasConfig, _, _>(iii, PROVIDER_NAME, stream);
+    Ok(())
 }
 
 pub async fn collect(mut stream: ReceiverStream<AssistantMessageEvent>) -> AssistantMessage {

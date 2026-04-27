@@ -44,7 +44,7 @@ pub enum VertexError {
 }
 
 /// Configuration for a single Vertex AI streaming call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VertexConfig {
     /// OAuth 2 access token from ADC. Caller refreshes when it expires.
     pub access_token: String,
@@ -541,6 +541,12 @@ fn build_content(state: &PartialState) -> Vec<ContentBlock> {
         });
     }
     content
+}
+
+/// Register `provider::google-vertex::stream` on the iii bus.
+pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
+    provider_base::register_provider_stream::<VertexConfig, _, _>(iii, PROVIDER_NAME, stream);
+    Ok(())
 }
 
 /// Convenience: collect a stream into a final `AssistantMessage`.

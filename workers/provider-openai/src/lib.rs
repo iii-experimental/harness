@@ -25,7 +25,7 @@ pub const DEFAULT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 pub const PROVIDER_NAME: &str = "openai";
 
 /// Configuration for a single OpenAI Chat Completions streaming call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OpenAIConfig {
     pub api_key: String,
     pub model: String,
@@ -83,6 +83,12 @@ pub async fn stream(
         },
     )
     .await
+}
+
+/// Register `provider::openai::stream` on the iii bus.
+pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
+    provider_base::register_provider_stream::<OpenAIConfig, _, _>(iii, PROVIDER_NAME, stream);
+    Ok(())
 }
 
 /// Convenience: collect a stream into a final `AssistantMessage`.

@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 harness-types = { path = "../harness-types" }
 provider-base = { path = "../provider-base" }
+iii-sdk = { workspace = true }
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

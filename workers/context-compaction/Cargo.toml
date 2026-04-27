@@ -1,6 +1,6 @@
 [package]
 name = "context-compaction"
-description = "stub - implementation pending"
+description = "Async stream subscriber that watches AgentEvent token usage and triggers session compaction when the configured threshold is reached. Persists summaries via session-tree::compact."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,15 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+session-tree = { path = "../session-tree" }
+models-catalog = { path = "../models-catalog" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }

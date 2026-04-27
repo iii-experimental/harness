@@ -1,1 +1,106 @@
-//! Stub. Implementation pending.
+//! OpenCode Go gateway Chat Completions streaming via provider-base.
+
+use std::sync::Arc;
+
+use harness_types::{AgentMessage, AgentTool, AssistantMessage, AssistantMessageEvent, StopReason};
+use provider_base::{stream_chat_completions, ChatCompletionsConfig, OpenAICompatRequest};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
+
+// TODO: confirm endpoint with provider docs
+const API_URL: &str = "https://gateway.opencode.ai/v1/chat/completions";
+const PROVIDER_NAME: &str = "opencode-go";
+
+#[derive(Debug, Clone)]
+pub struct OpencodeGoConfig {
+    pub api_key: String,
+    pub model: String,
+    pub max_tokens: u32,
+}
+
+impl OpencodeGoConfig {
+    pub fn from_env(model: impl Into<String>) -> Result<Self, std::env::VarError> {
+        let api_key = std::env::var("OPENCODE_GO_API_KEY")?;
+        Ok(Self {
+            api_key,
+            model: model.into(),
+            max_tokens: 4096,
+        })
+    }
+}
+
+pub async fn stream(
+    cfg: Arc<OpencodeGoConfig>,
+    system_prompt: String,
+    messages: Vec<AgentMessage>,
+    tools: Vec<AgentTool>,
+) -> ReceiverStream<AssistantMessageEvent> {
+    let base = ChatCompletionsConfig::new(
+        API_URL,
+        PROVIDER_NAME,
+        cfg.model.clone(),
+        cfg.api_key.clone(),
+    )
+    .with_max_tokens(cfg.max_tokens);
+    let req = OpenAICompatRequest {
+        system_prompt,
+        messages,
+        tools,
+    };
+    stream_chat_completions(Arc::new(base), req).await
+}
+
+pub async fn collect(mut stream: ReceiverStream<AssistantMessageEvent>) -> AssistantMessage {
+    let mut last: Option<AssistantMessage> = None;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            AssistantMessageEvent::Done { message } => return message,
+            AssistantMessageEvent::Error { error } => return error,
+            AssistantMessageEvent::Start { partial }
+            | AssistantMessageEvent::TextStart { partial }
+            | AssistantMessageEvent::TextDelta { partial, .. }
+            | AssistantMessageEvent::TextEnd { partial }
+            | AssistantMessageEvent::ToolcallStart { partial }
+            | AssistantMessageEvent::ToolcallDelta { partial, .. }
+            | AssistantMessageEvent::ToolcallEnd { partial }
+            | AssistantMessageEvent::ThinkingStart { partial }
+            | AssistantMessageEvent::ThinkingDelta { partial, .. }
+            | AssistantMessageEvent::ThinkingEnd { partial } => last = Some(partial),
+            _ => {}
+        }
+    }
+    last.unwrap_or_else(|| AssistantMessage {
+        content: vec![],
+        stop_reason: StopReason::Error,
+        error_message: Some("stream closed without final".into()),
+        error_kind: Some(harness_types::ErrorKind::Transient),
+        usage: None,
+        model: "unknown".into(),
+        provider: PROVIDER_NAME.into(),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_from_env_missing_returns_err() {
+        let prev = std::env::var("OPENCODE_GO_API_KEY").ok();
+        std::env::remove_var("OPENCODE_GO_API_KEY");
+        assert!(OpencodeGoConfig::from_env("test-model").is_err());
+        if let Some(v) = prev {
+            std::env::set_var("OPENCODE_GO_API_KEY", v);
+        }
+    }
+
+    #[test]
+    fn config_carries_model_and_max_tokens() {
+        std::env::set_var("OPENCODE_GO_API_KEY", "test-key");
+        let cfg = OpencodeGoConfig::from_env("test-model").unwrap();
+        assert_eq!(cfg.model, "test-model");
+        assert_eq!(cfg.max_tokens, 4096);
+        std::env::remove_var("OPENCODE_GO_API_KEY");
+    }
+}

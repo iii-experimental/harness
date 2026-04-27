@@ -1,6 +1,6 @@
 [package]
 name = "provider-huggingface"
-description = "stub — implementation pending"
+description = "HuggingFace Inference API Chat Completions streaming via provider-base"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,13 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+provider-base = { path = "../provider-base" }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }

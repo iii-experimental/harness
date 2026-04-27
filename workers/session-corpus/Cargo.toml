@@ -1,6 +1,6 @@
 [package]
 name = "session-corpus"
-description = "stub - implementation pending"
+description = "Session JSONL redaction and dataset publishing pipeline. Wraps a TruffleHog secret scan, applies user-configured deny patterns, optionally runs an LLM review pass, and uploads the cleaned session to a configurable dataset platform."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,18 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+session-tree = { path = "../session-tree" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"

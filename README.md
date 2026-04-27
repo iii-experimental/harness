@@ -41,9 +41,37 @@ The loop adds:
 
 That is the entire vocabulary. Implementation details (auth, models, providers, storage, sandbox, sub-agents) are workers consumed through iii functions.
 
+## End-to-end demo (real LLM)
+
+The reference CLI binary `harness` wires the loop to the Anthropic Messages API and a real bash tool so you can run real tasks today.
+
+```bash
+# build
+cargo build --release --bin harness
+
+# set credentials
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# task: agent reads a file, edits it, then verifies via bash
+./target/release/harness "open README.md, summarise it in three sentences, then list every workspace crate using ls."
+
+# read-only mode (no bash tool)
+./target/release/harness --no-bash "what are the workspace crates?"
+
+# pick a different model
+./target/release/harness --model claude-haiku-4-5 "say hi"
+```
+
+Available tools the agent can call:
+- `read`, `write`, `edit` — file ops with diff-style replace
+- `ls`, `find`, `grep` — directory walks and substring search
+- `bash` — runs commands via `bash -lc` with output truncated to 30000 chars (omit with `--no-bash`)
+
+The CLI prints AgentEvents as they stream so you can watch the agent reason, call tools, and iterate.
+
 ## Status
 
-Apache-2.0. Not yet published. Specs in repo: `ARCHITECTURE.md`, `PHASES.md`.
+Apache-2.0. 0.1.0 released. Specs in repo: `ARCHITECTURE.md`, `PHASES.md`.
 
 ## Contributing
 

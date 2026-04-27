@@ -11,6 +11,8 @@ members = [
     "workers/fixtures-gen",
     "workers/replay-test",
     "workers/hook-example",
+    "workers/provider-anthropic",
+    "workers/harness-cli",
 ]
 
 [workspace.package]
@@ -89,6 +91,11 @@ manual_string_new = "allow"
 redundant_else = "allow"
 cognitive_complexity = "allow"
 branches_sharing_code = "allow"
+unnecessary_lazy_evaluations = "allow"
+non_std_lazy_statics = "allow"
+ignore_without_reason = "allow"
+struct_field_names = "allow"
+naive_bytecount = "allow"
 suspicious_arithmetic_impl = "allow"
 return_self_not_must_use = "allow"
 needless_pass_by_ref_mut = "allow"

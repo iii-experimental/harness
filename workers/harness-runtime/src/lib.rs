@@ -11,6 +11,8 @@ pub mod loop_state;
 pub mod runtime;
 pub mod tools;
 
+pub use tools::{BashPlaceholder, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
+
 pub use loop_state::{run_loop, LoopConfig, LoopOutcome};
 pub use runtime::{
     BatchOutcome, CapturedEvents, EchoTool, EventSink, FinalizedTool, HookOutcome, LoopRuntime,

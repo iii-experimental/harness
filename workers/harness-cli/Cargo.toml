@@ -1,0 +1,26 @@
+[package]
+name = "harness-cli"
+description = "Reference CLI binary for the harness loop. Wires harness-runtime to a real provider (Anthropic) and built-in tools so an agent can run real tasks end-to-end."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+harness-runtime = { path = "../harness-runtime" }
+provider-anthropic = { path = "../provider-anthropic" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"

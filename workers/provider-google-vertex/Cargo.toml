@@ -1,6 +1,6 @@
 [package]
 name = "provider-google-vertex"
-description = "stub — implementation pending"
+description = "Streaming client for Google Vertex AI Gemini. Same wire shape as provider-google; differs in URL (region + project + model + :streamGenerateContent) and auth (Authorization: Bearer <ADC token>)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,16 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+provider-base = { path = "../provider-base" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+chrono = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "fixtures-gen"
+description = "Synthesize replay fixtures for harness tests. Emits agent-session JSONL files and golden AgentEvent sequences."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+session-tree = { path = "../session-tree" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[[bin]]
+name = "gen-fixtures"
+path = "src/main.rs"

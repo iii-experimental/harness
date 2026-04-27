@@ -1,0 +1,25 @@
+[package]
+name = "harness-runtime"
+description = "Agent loop orchestrator. Hosts agent::run_loop plus 9 sibling functions and 6 inlined built-in tools. Pure Rust state machine over a pluggable runtime trait."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+session-tree = { path = "../session-tree" }
+auth-storage = { path = "../auth-storage" }
+provider-faux = { path = "../provider-faux" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }

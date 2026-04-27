@@ -1,0 +1,4 @@
+{"type":"message","id":"u1","parent_id":null,"message":{"role":"user","content":[{"type":"text","text":"read /tmp/x and /tmp/y"}],"timestamp":1},"timestamp":1}
+{"type":"message","id":"a1","parent_id":"u1","message":{"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"echo","arguments":{"text":"x-result"}}],"stop_reason":"tool","model":"faux-model","provider":"faux","timestamp":2},"timestamp":2}
+{"type":"message","id":"t1","parent_id":"a1","message":{"role":"tool_result","tool_call_id":"call-1","tool_name":"echo","content":[{"type":"text","text":"x-result"}],"details":{},"is_error":false,"timestamp":3},"timestamp":3}
+{"type":"message","id":"a2","parent_id":"t1","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stop_reason":"end","model":"faux-model","provider":"faux","timestamp":4},"timestamp":4}

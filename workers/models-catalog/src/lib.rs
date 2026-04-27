@@ -82,7 +82,7 @@ pub fn list(filter: &ListFilter) -> Vec<Model> {
     CATALOG
         .iter()
         .filter(|m| filter.provider.as_ref().is_none_or(|p| p == &m.provider))
-        .filter(|m| filter.capability.map_or(true, |c| supports_model(m, c)))
+        .filter(|m| filter.capability.is_none_or(|c| supports_model(m, c)))
         .cloned()
         .collect()
 }

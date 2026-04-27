@@ -1,0 +1,19 @@
+[package]
+name = "provider-faux"
+description = "Deterministic test fixture provider. Maps hash(context) to canned event sequences for replay tests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

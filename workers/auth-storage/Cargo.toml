@@ -1,0 +1,20 @@
+[package]
+name = "auth-storage"
+description = "Multi-process safe credential store for API keys and OAuth tokens. Backed by a pluggable storage trait; iii state worker is the production backend."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }

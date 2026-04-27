@@ -10,6 +10,7 @@ pub mod app;
 pub mod bash;
 pub mod fuzzy;
 pub mod input;
+pub mod markdown;
 pub mod render;
 pub mod sink;
 pub mod slash;

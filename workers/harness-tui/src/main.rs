@@ -622,7 +622,8 @@ fn print_help() {
     println!("  Esc           clear editor / abort run");
     println!("  Ctrl+C        quit");
     println!("  Ctrl+L        clear scrollback");
-    println!("  Ctrl+T        toggle tool-output truncation");
+    println!("  Ctrl+O        toggle collapsed tool output");
+    println!("  Ctrl+T        toggle expanded thinking blocks");
     println!("  PgUp/PgDn     scroll scrollback");
     println!("  Up/Down       browse submitted message history");
 }
@@ -781,7 +782,9 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
     max_turns: usize,
 ) -> Result<()> {
     let tick_rate = Duration::from_millis(33); // ~30 fps
+    let spinner_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
+    let mut last_spinner = Instant::now();
 
     loop {
         app.drain_events();
@@ -809,6 +812,10 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
 
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
+        }
+        if last_spinner.elapsed() >= spinner_rate {
+            app.tick();
+            last_spinner = Instant::now();
         }
 
         if app.should_quit {
@@ -840,7 +847,8 @@ fn handle_key(
             }
         }
         (KeyCode::Char('l'), true, _, _) => app.clear_scrollback(),
-        (KeyCode::Char('t'), true, _, _) => app.toggle_tool_truncation(),
+        (KeyCode::Char('o'), true, _, _) => app.toggle_tools_collapsed(),
+        (KeyCode::Char('t'), true, _, _) => app.toggle_expand_thinking(),
         (KeyCode::Char('w'), true, _, _) => {
             app.editor.delete_word_back();
             app.refresh_command_picker();

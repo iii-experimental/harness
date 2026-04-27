@@ -6,12 +6,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, MessageRole};
+use crate::app::{App, AppStatus, MessageRole};
+use crate::markdown;
 use crate::theme;
 
 const MAX_INPUT_ROWS: u16 = 10;
 
-/// Top-level draw entry point. Three rows + status bar layout.
+/// Top-level draw entry point. Header + scrollback + queue/spinner + input +
+/// status bar layout.
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let input_inner_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS as usize) as u16;
@@ -21,7 +23,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Min(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
             Constraint::Length(input_height),
             Constraint::Length(1),
         ])
@@ -29,13 +32,14 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_header(f, chunks[0], app);
     draw_messages(f, chunks[1], app);
-    draw_input(f, chunks[2], app);
-    draw_status(f, chunks[3], app);
+    draw_queue_indicator(f, chunks[2], app);
+    draw_input(f, chunks[3], app);
+    draw_status(f, chunks[4], app);
 
     if app.command_picker_visible {
-        draw_command_picker(f, chunks[1], chunks[2], app);
+        draw_command_picker(f, chunks[1], chunks[3], app);
     } else if app.file_picker_visible {
-        draw_file_picker(f, chunks[1], chunks[2], app);
+        draw_file_picker(f, chunks[1], chunks[3], app);
     }
 }
 
@@ -53,33 +57,126 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
-    let lines: Vec<Line> = app
-        .messages
-        .iter()
-        .map(|m| {
-            let style = match m.role {
-                MessageRole::User => theme::user_style(),
-                MessageRole::Assistant => theme::assistant_style(),
-                MessageRole::ToolResult => {
-                    if m.text.contains("tool err") {
-                        theme::tool_err_style()
-                    } else if m.text.contains("tool ok") {
-                        theme::tool_ok_style()
-                    } else {
-                        theme::tool_call_style()
+    let md_theme = markdown::Theme::from_palette();
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(app.messages.len() * 2);
+
+    for m in &app.messages {
+        match m.role {
+            MessageRole::User => {
+                lines.push(Line::from(Span::styled(
+                    m.text.clone(),
+                    theme::user_style(),
+                )));
+            }
+            MessageRole::Assistant => {
+                let parsed = markdown::parse_to_lines(&m.text, &md_theme);
+                lines.extend(parsed);
+            }
+            MessageRole::Thinking => {
+                if app.expand_thinking {
+                    let header = Line::from(Span::styled(
+                        "[thinking]".to_string(),
+                        theme::thinking_style(),
+                    ));
+                    lines.push(header);
+                    for raw in m.text.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {raw}"),
+                            theme::thinking_style(),
+                        )));
                     }
+                } else {
+                    let label = match m.thinking_token_count {
+                        Some(n) => format!("[thinking ~{n} tokens — Ctrl+T expand]"),
+                        None => "[thinking — Ctrl+T expand]".to_string(),
+                    };
+                    lines.push(Line::from(Span::styled(label, theme::thinking_style())));
                 }
-                MessageRole::Notification => theme::notification_style(),
-            };
-            Line::from(Span::styled(m.text.clone(), style))
-        })
-        .collect();
+            }
+            MessageRole::ToolResult => {
+                lines.extend(render_tool_result_lines(m, app));
+            }
+            MessageRole::Notification => {
+                lines.push(Line::from(Span::styled(
+                    m.text.clone(),
+                    theme::notification_style(),
+                )));
+            }
+        }
+    }
 
     let p = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((app.scroll_offset, 0))
         .block(Block::default().borders(Borders::TOP | Borders::BOTTOM));
     f.render_widget(p, area);
+}
+
+fn render_tool_result_lines(m: &crate::app::RenderedMessage, app: &App) -> Vec<Line<'static>> {
+    // Tool-call args header lines: "      -> tool call: name(args)" — render
+    // as plain dim line, no expansion behaviour.
+    if m.text.trim_start().starts_with("-> tool call:") {
+        return vec![Line::from(Span::styled(
+            m.text.clone(),
+            theme::tool_call_style(),
+        ))];
+    }
+
+    // Otherwise this is a tool result line. Look up the matching call to
+    // decide between collapsed/expanded.
+    let call = m
+        .tool_call_id
+        .as_ref()
+        .and_then(|id| app.tool_calls.iter().find(|tc| &tc.tool_call_id == id));
+
+    let style = if m.is_error {
+        theme::tool_err_style()
+    } else {
+        theme::tool_ok_style()
+    };
+    let header_label = if m.is_error {
+        "      [tool err]"
+    } else {
+        "      [tool ok]"
+    };
+
+    let collapsed = match call {
+        Some(c) => app.tools_collapsed && c.collapsed,
+        None => app.tools_collapsed,
+    };
+
+    if collapsed {
+        let preview: String = call
+            .and_then(|c| c.result_preview.as_deref())
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect();
+        let suffix = if preview.is_empty() {
+            "<expand: Ctrl+O>".to_string()
+        } else {
+            format!("{preview}  <expand: Ctrl+O>")
+        };
+        return vec![Line::from(vec![
+            Span::styled(format!("{header_label} "), style),
+            Span::styled(
+                suffix,
+                Style::default()
+                    .fg(ratatui::style::Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ])];
+    }
+
+    let body = call
+        .and_then(|c| c.result_full.as_deref())
+        .unwrap_or_else(|| m.text.as_str());
+    let mut out = Vec::new();
+    out.push(Line::from(Span::styled(header_label.to_string(), style)));
+    for raw in body.lines() {
+        out.push(Line::from(Span::styled(format!("      {raw}"), style)));
+    }
+    out
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
@@ -119,6 +216,49 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         x.min(area.x + area.width.saturating_sub(2)),
         y.min(area.y + area.height.saturating_sub(2)),
     ));
+}
+
+fn draw_queue_indicator(f: &mut Frame, area: Rect, app: &App) {
+    let mut left_spans: Vec<Span<'static>> = Vec::new();
+
+    if matches!(app.status, AppStatus::Running) {
+        let glyph = app.spinner_glyph();
+        left_spans.push(Span::styled(format!("{glyph} "), theme::spinner_style()));
+        let elapsed = app.elapsed_label();
+        if !elapsed.is_empty() {
+            left_spans.push(Span::styled(format!("{elapsed}  "), theme::status_style()));
+        }
+    }
+
+    if app.queued_steering_count > 0 {
+        left_spans.push(Span::styled(
+            format!("! {} queued  ", app.queued_steering_count),
+            theme::queue_style(),
+        ));
+    }
+    if app.queued_followup_count > 0 {
+        left_spans.push(Span::styled(
+            format!("> {} follow-up  ", app.queued_followup_count),
+            theme::queue_style(),
+        ));
+    }
+
+    let right_text = app
+        .current_tool
+        .as_ref()
+        .map(|t| format!("tool: {t}"))
+        .unwrap_or_default();
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(1), Constraint::Length(40)])
+        .split(area);
+
+    let left = Paragraph::new(Line::from(left_spans)).alignment(Alignment::Left);
+    let right = Paragraph::new(Line::from(Span::styled(right_text, theme::status_style())))
+        .alignment(Alignment::Right);
+    f.render_widget(left, cols[0]);
+    f.render_widget(right, cols[1]);
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
@@ -239,7 +379,7 @@ mod tests {
 
     #[test]
     fn draw_renders_header_and_status() {
-        let backend = TestBackend::new(80, 12);
+        let backend = TestBackend::new(80, 14);
         let mut terminal = Terminal::new(backend).unwrap();
         let (sink, rx) = ChannelSink::new();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -269,7 +409,7 @@ mod tests {
 
     #[test]
     fn draw_shows_command_picker_when_visible() {
-        let backend = TestBackend::new(80, 16);
+        let backend = TestBackend::new(80, 18);
         let mut terminal = Terminal::new(backend).unwrap();
         let (_sink, rx) = ChannelSink::new();
         let mut app = App::new(
@@ -290,5 +430,116 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<String>();
         assert!(dump.contains("/help"));
+    }
+
+    #[test]
+    fn collapsed_tool_result_shows_single_line_with_ctrl_o_hint() {
+        use crate::app::{RenderedMessage, RenderedToolCall, ToolState};
+
+        let (_sink, rx) = ChannelSink::new();
+        let mut app = App::new(
+            "s1".into(),
+            "anthropic".into(),
+            "claude".into(),
+            "/tmp".into(),
+            rx,
+            Arc::new(Noop),
+        );
+        app.tool_calls.push(RenderedToolCall {
+            tool_call_id: "c9".into(),
+            tool_name: "read".into(),
+            args: serde_json::json!({}),
+            state: ToolState::Done,
+            result_preview: Some("first line of result".into()),
+            result_full: Some("first line of result\nsecond line\nthird line".into()),
+            collapsed: true,
+        });
+        app.messages.push(RenderedMessage {
+            role: MessageRole::ToolResult,
+            text: "      [tool ok] first line of result".into(),
+            timestamp: 0,
+            thinking_token_count: None,
+            tool_call_id: Some("c9".into()),
+            is_error: false,
+        });
+
+        let lines = render_tool_result_lines(&app.messages[0], &app);
+        assert_eq!(lines.len(), 1);
+        let dumped: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(dumped.contains("[tool ok]"));
+        assert!(dumped.contains("Ctrl+O"));
+    }
+
+    #[test]
+    fn expanded_tool_result_emits_multiple_indented_lines() {
+        use crate::app::{RenderedMessage, RenderedToolCall, ToolState};
+
+        let (_sink, rx) = ChannelSink::new();
+        let mut app = App::new(
+            "s1".into(),
+            "anthropic".into(),
+            "claude".into(),
+            "/tmp".into(),
+            rx,
+            Arc::new(Noop),
+        );
+        app.tools_collapsed = false;
+        app.tool_calls.push(RenderedToolCall {
+            tool_call_id: "c9".into(),
+            tool_name: "read".into(),
+            args: serde_json::json!({}),
+            state: ToolState::Done,
+            result_preview: Some("first".into()),
+            result_full: Some("alpha\nbeta\ngamma".into()),
+            collapsed: false,
+        });
+        app.messages.push(RenderedMessage {
+            role: MessageRole::ToolResult,
+            text: "      [tool ok] alpha".into(),
+            timestamp: 0,
+            thinking_token_count: None,
+            tool_call_id: Some("c9".into()),
+            is_error: false,
+        });
+
+        let lines = render_tool_result_lines(&app.messages[0], &app);
+        assert!(
+            lines.len() >= 4,
+            "expected header + 3 body, got {}",
+            lines.len()
+        );
+        let last: String = lines[3].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(last.contains("gamma"));
+        assert!(last.starts_with("      "));
+    }
+
+    #[test]
+    fn queue_indicator_shows_counts_and_spinner() {
+        let backend = TestBackend::new(80, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let (_sink, rx) = ChannelSink::new();
+        let mut app = App::new(
+            "s1".into(),
+            "anthropic".into(),
+            "claude".into(),
+            "/tmp".into(),
+            rx,
+            Arc::new(Noop),
+        );
+        app.apply_event(AgentEvent::AgentStart);
+        app.queued_steering_count = 2;
+        app.queued_followup_count = 1;
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let dump = buffer
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(dump.contains("2 queued"), "missing queue marker in {dump}");
+        assert!(
+            dump.contains("1 follow-up"),
+            "missing follow-up marker in {dump}"
+        );
     }
 }

@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use harness_types::{AgentEvent, AgentMessage, ContentBlock, Usage};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -26,6 +27,7 @@ pub enum AppStatus {
 pub enum MessageRole {
     User,
     Assistant,
+    Thinking,
     ToolResult,
     Notification,
 }
@@ -36,6 +38,25 @@ pub struct RenderedMessage {
     pub role: MessageRole,
     pub text: String,
     pub timestamp: i64,
+    /// Approximate token count for `MessageRole::Thinking` lines, otherwise `None`.
+    pub thinking_token_count: Option<u32>,
+    /// Tool-call id this scrollback entry is associated with (for `ToolResult`).
+    pub tool_call_id: Option<String>,
+    /// True for tool-result lines that came back as errors.
+    pub is_error: bool,
+}
+
+impl RenderedMessage {
+    fn plain(role: MessageRole, text: String, timestamp: i64) -> Self {
+        Self {
+            role,
+            text,
+            timestamp,
+            thinking_token_count: None,
+            tool_call_id: None,
+            is_error: false,
+        }
+    }
 }
 
 /// State of an in-flight tool call.
@@ -56,6 +77,10 @@ pub struct RenderedToolCall {
     pub args: serde_json::Value,
     pub state: ToolState,
     pub result_preview: Option<String>,
+    /// Full tool result body (only populated when the call ends).
+    pub result_full: Option<String>,
+    /// Per-call collapse state. Defaults to `true`.
+    pub collapsed: bool,
 }
 
 /// What the input layer needs to talk back to the runtime. Implemented by the
@@ -92,7 +117,20 @@ pub struct App {
     pub scroll_offset: u16,
     pub history: Vec<String>,
     pub history_cursor: Option<usize>,
-    pub tool_truncate: bool,
+    /// When `true`, every tool result renders as a single-line preview.
+    pub tools_collapsed: bool,
+    /// When `false`, thinking blocks render as a single dim placeholder.
+    pub expand_thinking: bool,
+    /// Animated braille spinner index, advanced once per UI tick.
+    pub spinner_frame: usize,
+    /// Wall-clock timestamp of the last `AgentStart`. Cleared on `AgentEnd`.
+    pub run_started_at: Option<Instant>,
+    /// Tool name currently executing, if any.
+    pub current_tool: Option<String>,
+    /// Number of pending steering submissions queued during a live run.
+    pub queued_steering_count: usize,
+    /// Number of pending follow-up submissions queued during a live run.
+    pub queued_followup_count: usize,
     pub event_rx: UnboundedReceiver<AgentEvent>,
     pub runtime: Arc<dyn RuntimeHandle>,
     pub should_quit: bool,
@@ -131,7 +169,13 @@ impl App {
             scroll_offset: 0,
             history: Vec::new(),
             history_cursor: None,
-            tool_truncate: true,
+            tools_collapsed: true,
+            expand_thinking: false,
+            spinner_frame: 0,
+            run_started_at: None,
+            current_tool: None,
+            queued_steering_count: 0,
+            queued_followup_count: 0,
             event_rx,
             runtime,
             should_quit: false,
@@ -161,15 +205,26 @@ impl App {
         match ev {
             AgentEvent::AgentStart => {
                 self.status = AppStatus::Running;
+                self.run_started_at = Some(Instant::now());
             }
             AgentEvent::AgentEnd { .. } => {
                 if !matches!(self.status, AppStatus::Aborted | AppStatus::Errored(_)) {
                     self.status = AppStatus::Idle;
                 }
+                self.run_started_at = None;
+                self.current_tool = None;
+                self.queued_steering_count = 0;
+                self.queued_followup_count = 0;
             }
             AgentEvent::TurnStart => {}
             AgentEvent::TurnEnd { .. } => {
                 self.turn_count = self.turn_count.saturating_add(1);
+                if self.queued_steering_count > 0 {
+                    self.queued_steering_count -= 1;
+                }
+                if self.queued_followup_count > 0 {
+                    self.queued_followup_count -= 1;
+                }
             }
             AgentEvent::MessageStart { message } => {
                 self.push_message(&message);
@@ -181,12 +236,15 @@ impl App {
                 tool_name,
                 args,
             } => {
+                self.current_tool = Some(tool_name.clone());
                 self.tool_calls.push(RenderedToolCall {
                     tool_call_id,
                     tool_name,
                     args,
                     state: ToolState::Running,
                     result_preview: None,
+                    result_full: None,
+                    collapsed: true,
                 });
             }
             AgentEvent::ToolExecutionUpdate { .. } => {}
@@ -196,7 +254,7 @@ impl App {
                 result,
                 ..
             } => {
-                let preview = result
+                let full = result
                     .content
                     .iter()
                     .find_map(|c| match c {
@@ -204,7 +262,7 @@ impl App {
                         _ => None,
                     })
                     .unwrap_or_default();
-                let preview_short: String = preview.chars().take(160).collect();
+                let preview_short: String = full.chars().take(160).collect();
                 if let Some(tc) = self
                     .tool_calls
                     .iter_mut()
@@ -217,7 +275,9 @@ impl App {
                         ToolState::Done
                     };
                     tc.result_preview = Some(preview_short.clone());
+                    tc.result_full = Some(full);
                 }
+                self.current_tool = None;
                 let role = if is_error {
                     MessageRole::Notification
                 } else {
@@ -226,14 +286,32 @@ impl App {
                 self.messages.push(RenderedMessage {
                     role,
                     text: format!(
-                        "    [tool {}] {}",
+                        "      [tool {}] {}",
                         if is_error { "err" } else { "ok" },
                         preview_short
                     ),
                     timestamp: chrono::Utc::now().timestamp_millis(),
+                    thinking_token_count: None,
+                    tool_call_id: Some(tool_call_id),
+                    is_error,
                 });
             }
         }
+    }
+
+    /// Advance the spinner one frame. Called once per UI tick by main.
+    pub fn tick(&mut self) {
+        self.spinner_frame = self.spinner_frame.wrapping_add(1);
+    }
+
+    /// Toggle the global tool-collapse flag.
+    pub fn toggle_tools_collapsed(&mut self) {
+        self.tools_collapsed = !self.tools_collapsed;
+    }
+
+    /// Toggle thinking-block expansion.
+    pub fn toggle_expand_thinking(&mut self) {
+        self.expand_thinking = !self.expand_thinking;
     }
 
     fn push_message(&mut self, message: &AgentMessage) {
@@ -241,32 +319,47 @@ impl App {
             AgentMessage::User(u) => {
                 let text = collect_text(&u.content);
                 if !text.is_empty() {
-                    self.messages.push(RenderedMessage {
-                        role: MessageRole::User,
-                        text: format!(">>> user: {text}"),
-                        timestamp: u.timestamp,
-                    });
+                    self.messages.push(RenderedMessage::plain(
+                        MessageRole::User,
+                        format!(">>> user: {text}"),
+                        u.timestamp,
+                    ));
                 }
             }
             AgentMessage::Assistant(a) => {
+                for c in &a.content {
+                    if let ContentBlock::Thinking { text, .. } = c {
+                        if !text.is_empty() {
+                            let approx_tokens = u32::try_from(text.len() / 4).unwrap_or(u32::MAX);
+                            self.messages.push(RenderedMessage {
+                                role: MessageRole::Thinking,
+                                text: text.clone(),
+                                timestamp: a.timestamp,
+                                thinking_token_count: Some(approx_tokens),
+                                tool_call_id: None,
+                                is_error: false,
+                            });
+                        }
+                    }
+                }
                 let text = collect_text(&a.content);
                 if !text.is_empty() {
-                    self.messages.push(RenderedMessage {
-                        role: MessageRole::Assistant,
-                        text: format!("<<< assistant: {text}"),
-                        timestamp: a.timestamp,
-                    });
+                    self.messages.push(RenderedMessage::plain(
+                        MessageRole::Assistant,
+                        text,
+                        a.timestamp,
+                    ));
                 }
                 for c in &a.content {
                     if let ContentBlock::ToolCall {
                         name, arguments, ..
                     } = c
                     {
-                        self.messages.push(RenderedMessage {
-                            role: MessageRole::ToolResult,
-                            text: format!("    -> tool call: {name}({arguments})"),
-                            timestamp: a.timestamp,
-                        });
+                        self.messages.push(RenderedMessage::plain(
+                            MessageRole::ToolResult,
+                            format!("      -> tool call: {name}({arguments})"),
+                            a.timestamp,
+                        ));
                     }
                 }
                 if let Some(usage) = a.usage {
@@ -286,11 +379,11 @@ impl App {
             AgentMessage::ToolResult(_) => {}
             AgentMessage::Custom(c) => {
                 if let Some(d) = &c.display {
-                    self.messages.push(RenderedMessage {
-                        role: MessageRole::Notification,
-                        text: d.clone(),
-                        timestamp: c.timestamp,
-                    });
+                    self.messages.push(RenderedMessage::plain(
+                        MessageRole::Notification,
+                        d.clone(),
+                        c.timestamp,
+                    ));
                 }
             }
         }
@@ -312,11 +405,12 @@ impl App {
             AppStatus::Running => {
                 self.runtime
                     .enqueue_steering(&self.session_id, user_message(&text));
-                self.messages.push(RenderedMessage {
-                    role: MessageRole::Notification,
-                    text: format!("[steering queued] {text}"),
-                    timestamp: chrono::Utc::now().timestamp_millis(),
-                });
+                self.queued_steering_count = self.queued_steering_count.saturating_add(1);
+                self.messages.push(RenderedMessage::plain(
+                    MessageRole::Notification,
+                    format!("[steering queued] {text}"),
+                    chrono::Utc::now().timestamp_millis(),
+                ));
                 None
             }
         }
@@ -334,11 +428,12 @@ impl App {
             AppStatus::Running => {
                 self.runtime
                     .enqueue_steering(&self.session_id, user_message(&text));
-                self.messages.push(RenderedMessage {
-                    role: MessageRole::Notification,
-                    text: format!("[steering queued] {text}"),
-                    timestamp: chrono::Utc::now().timestamp_millis(),
-                });
+                self.queued_steering_count = self.queued_steering_count.saturating_add(1);
+                self.messages.push(RenderedMessage::plain(
+                    MessageRole::Notification,
+                    format!("[steering queued] {text}"),
+                    chrono::Utc::now().timestamp_millis(),
+                ));
                 None
             }
         }
@@ -358,11 +453,12 @@ impl App {
             AppStatus::Running => {
                 self.runtime
                     .enqueue_followup(&self.session_id, user_message(&text));
-                self.messages.push(RenderedMessage {
-                    role: MessageRole::Notification,
-                    text: format!("[follow-up queued] {text}"),
-                    timestamp: chrono::Utc::now().timestamp_millis(),
-                });
+                self.queued_followup_count = self.queued_followup_count.saturating_add(1);
+                self.messages.push(RenderedMessage::plain(
+                    MessageRole::Notification,
+                    format!("[follow-up queued] {text}"),
+                    chrono::Utc::now().timestamp_millis(),
+                ));
                 None
             }
         }
@@ -386,11 +482,11 @@ impl App {
         if matches!(self.status, AppStatus::Running) {
             self.runtime.abort(&self.session_id);
             self.status = AppStatus::Aborted;
-            self.messages.push(RenderedMessage {
-                role: MessageRole::Notification,
-                text: "[abort signalled]".into(),
-                timestamp: chrono::Utc::now().timestamp_millis(),
-            });
+            self.messages.push(RenderedMessage::plain(
+                MessageRole::Notification,
+                "[abort signalled]".into(),
+                chrono::Utc::now().timestamp_millis(),
+            ));
         }
     }
 
@@ -398,10 +494,6 @@ impl App {
         self.messages.clear();
         self.tool_calls.clear();
         self.scroll_offset = 0;
-    }
-
-    pub fn toggle_tool_truncation(&mut self) {
-        self.tool_truncate = !self.tool_truncate;
     }
 
     pub fn scroll_up(&mut self, n: u16) {
@@ -442,11 +534,29 @@ impl App {
 
     /// Push a notification line into scrollback.
     pub fn push_notification(&mut self, text: impl Into<String>) {
-        self.messages.push(RenderedMessage {
-            role: MessageRole::Notification,
-            text: text.into(),
-            timestamp: chrono::Utc::now().timestamp_millis(),
-        });
+        self.messages.push(RenderedMessage::plain(
+            MessageRole::Notification,
+            text.into(),
+            chrono::Utc::now().timestamp_millis(),
+        ));
+    }
+
+    /// Compute the spinner glyph for the current frame.
+    pub fn spinner_glyph(&self) -> char {
+        const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        FRAMES[self.spinner_frame % FRAMES.len()]
+    }
+
+    /// Format `<elapsed>` for the running run as e.g. `0:08`. Returns empty
+    /// when no run is in flight.
+    pub fn elapsed_label(&self) -> String {
+        let Some(start) = self.run_started_at else {
+            return String::new();
+        };
+        let secs = start.elapsed().as_secs();
+        let m = secs / 60;
+        let s = secs % 60;
+        format!("{m}:{s:02}")
     }
 
     /// Recompute command picker state from the current editor buffer. Pickers
@@ -753,7 +863,8 @@ impl App {
 const HOTKEY_LINES: &[&str] = &[
     "[hotkeys] Enter: submit   Shift+Enter: newline   Alt+Enter: follow-up",
     "[hotkeys] Esc: clear / abort   Ctrl+C: abort or quit",
-    "[hotkeys] Ctrl+L: clear scrollback   Ctrl+T: toggle tool truncation",
+    "[hotkeys] Ctrl+L: clear scrollback   Ctrl+O: toggle tool collapse",
+    "[hotkeys] Ctrl+T: toggle thinking blocks",
     "[hotkeys] PgUp/PgDn: scroll   Up/Down: history (single-line) or row nav",
     "[hotkeys] / opens command picker, Tab completes; @ opens file picker",
     "[hotkeys] !cmd runs bash and submits result, !!cmd runs and prints only",
@@ -765,11 +876,7 @@ fn copy_last_assistant(messages: &[RenderedMessage]) -> Result<usize, String> {
         .rev()
         .find(|m| m.role == MessageRole::Assistant)
         .ok_or_else(|| "no assistant message in scrollback".to_string())?;
-    let text = last
-        .text
-        .strip_prefix("<<< assistant: ")
-        .unwrap_or(&last.text)
-        .to_string();
+    let text = last.text.clone();
     let len = text.len();
     let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     clip.set_text(text).map_err(|e| e.to_string())?;
@@ -1072,5 +1179,141 @@ mod tests {
         app.refresh_file_picker();
         assert!(app.file_picker_visible);
         assert_eq!(app.file_picker_query, "main");
+    }
+
+    #[test]
+    fn toggle_tools_collapsed_flips_state() {
+        let (mut app, _) = make_app();
+        assert!(app.tools_collapsed);
+        app.toggle_tools_collapsed();
+        assert!(!app.tools_collapsed);
+        app.toggle_tools_collapsed();
+        assert!(app.tools_collapsed);
+    }
+
+    #[test]
+    fn toggle_expand_thinking_flips_state() {
+        let (mut app, _) = make_app();
+        assert!(!app.expand_thinking);
+        app.toggle_expand_thinking();
+        assert!(app.expand_thinking);
+        app.toggle_expand_thinking();
+        assert!(!app.expand_thinking);
+    }
+
+    #[test]
+    fn agent_start_records_run_started_at() {
+        let (mut app, _) = make_app();
+        assert!(app.run_started_at.is_none());
+        app.apply_event(AgentEvent::AgentStart);
+        assert!(app.run_started_at.is_some());
+        app.apply_event(AgentEvent::AgentEnd {
+            messages: Vec::new(),
+        });
+        assert!(app.run_started_at.is_none());
+    }
+
+    #[test]
+    fn tick_advances_spinner_frame() {
+        let (mut app, _) = make_app();
+        let before = app.spinner_frame;
+        app.tick();
+        assert_eq!(app.spinner_frame, before.wrapping_add(1));
+        app.tick();
+        assert_eq!(app.spinner_frame, before.wrapping_add(2));
+    }
+
+    #[test]
+    fn submit_steering_while_running_increments_queue() {
+        let (mut app, _rt) = make_app();
+        app.apply_event(AgentEvent::AgentStart);
+        app.editor.set("steer me");
+        let _ = app.submit_message();
+        assert_eq!(app.queued_steering_count, 1);
+        app.editor.set("steer again");
+        let _ = app.submit_message();
+        assert_eq!(app.queued_steering_count, 2);
+    }
+
+    #[test]
+    fn submit_followup_while_running_increments_followup_queue() {
+        let (mut app, _rt) = make_app();
+        app.apply_event(AgentEvent::AgentStart);
+        app.editor.set("then this");
+        let _ = app.submit_followup();
+        assert_eq!(app.queued_followup_count, 1);
+    }
+
+    #[test]
+    fn tool_execution_start_sets_current_tool_and_clears_on_end() {
+        let (mut app, _) = make_app();
+        app.apply_event(AgentEvent::ToolExecutionStart {
+            tool_call_id: "c1".into(),
+            tool_name: "read".into(),
+            args: serde_json::json!({}),
+        });
+        assert_eq!(app.current_tool.as_deref(), Some("read"));
+        app.apply_event(AgentEvent::ToolExecutionEnd {
+            tool_call_id: "c1".into(),
+            tool_name: "read".into(),
+            result: ToolResult {
+                content: vec![ContentBlock::Text(TextContent { text: "ok".into() })],
+                details: serde_json::json!({}),
+                terminate: false,
+            },
+            is_error: false,
+        });
+        assert!(app.current_tool.is_none());
+    }
+
+    #[test]
+    fn tool_execution_end_records_full_result() {
+        let (mut app, _) = make_app();
+        app.apply_event(AgentEvent::ToolExecutionStart {
+            tool_call_id: "c2".into(),
+            tool_name: "read".into(),
+            args: serde_json::json!({}),
+        });
+        let big: String = "x".repeat(500);
+        app.apply_event(AgentEvent::ToolExecutionEnd {
+            tool_call_id: "c2".into(),
+            tool_name: "read".into(),
+            result: ToolResult {
+                content: vec![ContentBlock::Text(TextContent { text: big.clone() })],
+                details: serde_json::json!({}),
+                terminate: false,
+            },
+            is_error: false,
+        });
+        assert_eq!(app.tool_calls[0].result_full.as_deref(), Some(big.as_str()));
+        assert!(app.tool_calls[0].collapsed);
+    }
+
+    #[test]
+    fn thinking_block_pushes_thinking_message() {
+        let (mut app, _) = make_app();
+        let assistant = AssistantMessage {
+            content: vec![ContentBlock::Thinking {
+                text: "thinking text".into(),
+                signature: None,
+            }],
+            stop_reason: StopReason::End,
+            error_message: None,
+            error_kind: None,
+            usage: None,
+            model: "m".into(),
+            provider: "p".into(),
+            timestamp: 7,
+        };
+        app.apply_event(AgentEvent::MessageStart {
+            message: AgentMessage::Assistant(assistant),
+        });
+        let thinking = app
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::Thinking)
+            .expect("thinking message present");
+        assert_eq!(thinking.text, "thinking text");
+        assert!(thinking.thinking_token_count.is_some());
     }
 }

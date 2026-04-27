@@ -48,3 +48,21 @@ pub fn notification_style() -> Style {
         .fg(COLOR_NOTIFICATION)
         .add_modifier(Modifier::ITALIC)
 }
+
+pub fn thinking_style() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC | Modifier::DIM)
+}
+
+pub fn spinner_style() -> Style {
+    Style::default()
+        .fg(COLOR_HEADER)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn queue_style() -> Style {
+    Style::default()
+        .fg(Color::Magenta)
+        .add_modifier(Modifier::BOLD)
+}

@@ -30,6 +30,7 @@ use ratatui::Terminal;
 
 use harness_tui::app::SlashOutcome;
 use harness_tui::fuzzy::FuzzyIndex;
+use harness_tui::theme::Theme;
 use harness_tui::{App, AppStatus, ChannelSink, RuntimeHandle};
 
 const DEFAULT_PROVIDER: &str = "anthropic";
@@ -378,6 +379,7 @@ struct CliArgs {
     max_turns: usize,
     no_bash: bool,
     system_path: Option<String>,
+    theme: String,
 }
 
 fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
@@ -387,6 +389,7 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
     let mut max_turns = 10usize;
     let mut no_bash = false;
     let mut system_path: Option<String> = None;
+    let mut theme = "dark".to_string();
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -424,6 +427,13 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
                 );
                 i += 2;
             }
+            "--theme" => {
+                theme = raw
+                    .get(i + 1)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("--theme requires a value"))?;
+                i += 2;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -451,6 +461,7 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
         max_turns,
         no_bash,
         system_path,
+        theme,
     })
 }
 
@@ -613,6 +624,7 @@ fn print_help() {
     println!("  --max-turns <n>     stop after n turns (default: 10)");
     println!("  --no-bash           disable bash tool (read-only mode)");
     println!("  --system <path>     read system prompt from file");
+    println!("  --theme <name>      colour theme: dark | light | <user-file> (default: dark)");
     println!();
     println!("If no initial prompt is given, the TUI starts in idle mode awaiting first input.");
     println!();
@@ -739,6 +751,17 @@ async fn async_main() -> Result<()> {
         runtime_handle,
     );
     app.fuzzy_index = Some(FuzzyIndex::index(&PathBuf::from(&cwd)));
+    match Theme::load_named(&args.theme) {
+        Ok(t) => app.theme = t,
+        Err(e) => {
+            // Fall back to dark + push a notification so the user sees the
+            // failure rather than getting silently downgraded.
+            app.push_notification(format!(
+                "[theme] failed to load '{}' ({e}); using dark default",
+                args.theme
+            ));
+        }
+    }
 
     // Optionally kick off a run with the initial prompt argument.
     if let Some(initial) = args.prompt.clone() {
@@ -838,7 +861,24 @@ fn handle_key(
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
+    // Overlays consume input first.
+    if app.tree_visible {
+        handle_tree_key(key, app, ctrl, shift);
+        return;
+    }
+    if app.hotkeys_visible {
+        handle_hotkeys_key(key, app);
+        return;
+    }
+
+    // Reset double-Esc latch on any non-Esc key so it can't leak across
+    // unrelated keystrokes.
+    if !matches!(key.code, KeyCode::Esc) {
+        app.reset_esc_latch();
+    }
+
     match (key.code, ctrl, alt, shift) {
+        (KeyCode::Char('h'), true, _, _) => app.toggle_hotkeys_overlay(),
         (KeyCode::Char('c'), true, _, _) => {
             if matches!(app.status, AppStatus::Running) {
                 app.runtime.abort(&app.session_id);
@@ -913,7 +953,13 @@ fn handle_key(
         }
         (KeyCode::PageUp, _, _, _) => app.scroll_up(5),
         (KeyCode::PageDown, _, _, _) => app.scroll_down(5),
-        (KeyCode::Esc, _, _, _) => app.handle_escape(),
+        (KeyCode::Esc, _, _, _) => {
+            // Double-Esc opens tree overlay when state is already idle.
+            if app.maybe_open_tree_on_double_esc() {
+                return;
+            }
+            app.handle_escape();
+        }
         (KeyCode::Enter, _, _, true) => {
             // Shift+Enter inserts a newline regardless of picker state.
             app.editor.insert_newline();
@@ -989,6 +1035,55 @@ fn handle_key(
                 );
                 app.status = AppStatus::Running;
             }
+        }
+        _ => {}
+    }
+}
+
+/// Tree overlay key handler. Owns search input, filter cycle, bookmark, and
+/// pivot-to-top.
+fn handle_tree_key(key: KeyEvent, app: &mut App, ctrl: bool, shift: bool) {
+    match (key.code, ctrl, shift) {
+        (KeyCode::Esc, _, _) => {
+            app.tree_visible = false;
+        }
+        (KeyCode::Char('o'), true, _) => app.cycle_tree_filter(),
+        (KeyCode::Char('L' | 'l'), false, true) => {
+            app.toggle_tree_bookmark();
+        }
+        (KeyCode::Char('T' | 't'), false, true) => {
+            app.toggle_tree_timestamps();
+        }
+        (KeyCode::Up, _, _) => app.tree_cursor_up(),
+        (KeyCode::Down, _, _) => app.tree_cursor_down(),
+        (KeyCode::Enter, _, _) => {
+            // Pivot: visual highlight only; no real branching for 0.1.
+            // TODO: wire up real session branching when /fork is implemented.
+            app.tree_visible = false;
+        }
+        (KeyCode::Backspace, _, _) => app.tree_search_pop(),
+        (KeyCode::Char(c), false, _) => app.tree_search_push(c),
+        _ => {}
+    }
+}
+
+/// Hotkeys overlay key handler. Esc closes; arrow keys scroll.
+fn handle_hotkeys_key(key: KeyEvent, app: &mut App) {
+    match key.code {
+        KeyCode::Esc => app.hotkeys_visible = false,
+        KeyCode::Up => {
+            if app.hotkeys_cursor > 0 {
+                app.hotkeys_cursor -= 1;
+            }
+        }
+        KeyCode::Down => {
+            app.hotkeys_cursor = app.hotkeys_cursor.saturating_add(1);
+        }
+        KeyCode::PageUp => {
+            app.hotkeys_cursor = app.hotkeys_cursor.saturating_sub(8);
+        }
+        KeyCode::PageDown => {
+            app.hotkeys_cursor = app.hotkeys_cursor.saturating_add(8);
         }
         _ => {}
     }
@@ -1174,5 +1269,17 @@ mod tests {
     fn parse_args_accepts_system_path() {
         let parsed = parse_args_from(&args(&["--system", "/tmp/sys.txt", "go"])).expect("parse ok");
         assert_eq!(parsed.system_path.as_deref(), Some("/tmp/sys.txt"));
+    }
+
+    #[test]
+    fn parse_args_default_theme_is_dark() {
+        let parsed = parse_args_from(&args(&["go"])).expect("parse ok");
+        assert_eq!(parsed.theme, "dark");
+    }
+
+    #[test]
+    fn parse_args_accepts_theme_flag() {
+        let parsed = parse_args_from(&args(&["--theme", "light", "go"])).expect("parse ok");
+        assert_eq!(parsed.theme, "light");
     }
 }

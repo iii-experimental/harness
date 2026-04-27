@@ -2,6 +2,7 @@
 //! exposes the small `RuntimeHandle` trait that the input layer calls when the
 //! user submits, steers, or aborts a run.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,7 +16,10 @@ use crate::clipboard;
 use crate::fuzzy::FuzzyIndex;
 use crate::image::{self, ImageProtocol};
 use crate::input::EditorBuffer;
+use crate::keybindings::KeybindingsManager;
 use crate::slash::{parse_slash, SlashCommandRegistry};
+use crate::slots::SlotRegistry;
+use crate::theme::Theme;
 
 /// High-level loop state surfaced in the status bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +38,50 @@ pub enum MessageRole {
     Thinking,
     ToolResult,
     Notification,
+}
+
+/// View filter applied to the `/tree` overlay.
+///
+/// `Default` hides tool-call header lines (the "      -> tool call: name(...)"
+/// stub rendered with `MessageRole::ToolResult` text starting with `-> tool
+/// call:`); `NoTools` hides every tool-related row; `UserOnly` keeps just
+/// `MessageRole::User`; `Labeled` keeps only bookmarked indices; `All`
+/// surfaces everything including thinking blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeFilter {
+    Default,
+    NoTools,
+    UserOnly,
+    Labeled,
+    All,
+}
+
+impl TreeFilter {
+    pub const fn cycle(self) -> Self {
+        match self {
+            Self::Default => Self::NoTools,
+            Self::NoTools => Self::UserOnly,
+            Self::UserOnly => Self::Labeled,
+            Self::Labeled => Self::All,
+            Self::All => Self::Default,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::NoTools => "NoTools",
+            Self::UserOnly => "UserOnly",
+            Self::Labeled => "Labeled",
+            Self::All => "All",
+        }
+    }
+}
+
+impl Default for TreeFilter {
+    fn default() -> Self {
+        Self::Default
+    }
 }
 
 /// One scrollback entry. The renderer walks `messages` and emits styled lines.
@@ -199,6 +247,36 @@ pub struct App {
     /// placeholder lines. When `true`, the renderer also pushes real escape
     /// sequences to stdout. Off by default in 0.1 — see image.rs docs.
     pub image_render_native: bool,
+    /// Active runtime theme. Defaults to `Theme::dark_default()`. The legacy
+    /// free-function helpers in [`crate::theme`] still drive the bulk of the
+    /// renderer; future passes will switch to `app.theme.*_style()`.
+    pub theme: Theme,
+    /// Pluggable status-line + widget slot registry.
+    pub slots: SlotRegistry,
+    /// Keybinding manager (loads `~/.harness/keybindings.json` overrides).
+    /// For 0.1 it powers the `/hotkeys` overlay only — the actual key
+    /// dispatcher in `main.rs` keeps its hardcoded match arms.
+    pub keybindings: Arc<KeybindingsManager>,
+    /// `/tree` overlay visibility.
+    pub tree_visible: bool,
+    /// Active filter on the tree overlay.
+    pub tree_filter: TreeFilter,
+    /// Cursor index into the *filtered* tree view.
+    pub tree_cursor: usize,
+    /// Search substring applied while the overlay is open. Case-insensitive.
+    pub tree_search: String,
+    /// Whether to render `[ts]` prefixes in the overlay rows.
+    pub tree_show_timestamps: bool,
+    /// Bookmarked message indices (into `App.messages`).
+    pub tree_bookmarks: HashSet<usize>,
+    /// Tracks two-press Esc detection: bumped on first Esc when the editor +
+    /// pickers were already empty; second Esc within a short window opens
+    /// `/tree`. Reset whenever any other key fires.
+    pub esc_press_count: u8,
+    /// `/hotkeys` overlay visibility.
+    pub hotkeys_visible: bool,
+    /// Cursor row in the hotkeys overlay (for vertical scroll).
+    pub hotkeys_cursor: usize,
 }
 
 impl App {
@@ -248,6 +326,18 @@ impl App {
             pending_attachments: Vec::new(),
             image_protocol: image::detect_protocol(),
             image_render_native: false,
+            theme: Theme::default(),
+            slots: SlotRegistry::defaults(),
+            keybindings: Arc::new(KeybindingsManager::load()),
+            tree_visible: false,
+            tree_filter: TreeFilter::default(),
+            tree_cursor: 0,
+            tree_search: String::new(),
+            tree_show_timestamps: false,
+            tree_bookmarks: HashSet::new(),
+            esc_press_count: 0,
+            hotkeys_visible: false,
+            hotkeys_cursor: 0,
         }
     }
 
@@ -431,6 +521,150 @@ impl App {
     /// Toggle thinking-block expansion.
     pub fn toggle_expand_thinking(&mut self) {
         self.expand_thinking = !self.expand_thinking;
+    }
+
+    /// Open or close the `/tree` overlay.
+    pub fn toggle_tree_overlay(&mut self) {
+        self.tree_visible = !self.tree_visible;
+        if self.tree_visible {
+            self.tree_cursor = 0;
+            self.tree_search.clear();
+        }
+        // Closing tree clears any partial double-Esc state.
+        self.esc_press_count = 0;
+    }
+
+    /// Cycle `tree_filter` forward (Default -> NoTools -> ... -> All -> Default).
+    pub fn cycle_tree_filter(&mut self) {
+        self.tree_filter = self.tree_filter.cycle();
+        // Cursor may now point past the filtered list; reset to top.
+        self.tree_cursor = 0;
+    }
+
+    /// Toggle the bookmark for the focused message in the tree overlay (using
+    /// the current filtered view's `tree_cursor`).
+    pub fn toggle_tree_bookmark(&mut self) {
+        let visible = self.visible_tree_indices();
+        if let Some(&idx) = visible.get(self.tree_cursor) {
+            if !self.tree_bookmarks.insert(idx) {
+                self.tree_bookmarks.remove(&idx);
+            }
+        }
+    }
+
+    /// Toggle whether the tree overlay shows timestamps.
+    pub fn toggle_tree_timestamps(&mut self) {
+        self.tree_show_timestamps = !self.tree_show_timestamps;
+    }
+
+    /// Move the tree cursor down one row in the filtered view.
+    pub fn tree_cursor_down(&mut self) {
+        let n = self.visible_tree_indices().len();
+        if n == 0 {
+            self.tree_cursor = 0;
+            return;
+        }
+        if self.tree_cursor + 1 < n {
+            self.tree_cursor += 1;
+        }
+    }
+
+    /// Move the tree cursor up one row.
+    pub fn tree_cursor_up(&mut self) {
+        if self.tree_cursor > 0 {
+            self.tree_cursor -= 1;
+        }
+    }
+
+    /// Append a character to the tree-overlay search filter.
+    pub fn tree_search_push(&mut self, c: char) {
+        self.tree_search.push(c);
+        self.tree_cursor = 0;
+    }
+
+    /// Drop the last character from the tree-overlay search filter.
+    pub fn tree_search_pop(&mut self) {
+        self.tree_search.pop();
+        self.tree_cursor = 0;
+    }
+
+    /// Indices of `self.messages` that pass the current filter + search.
+    /// Returned vec is the source of truth for `tree_cursor` arithmetic.
+    pub fn visible_tree_indices(&self) -> Vec<usize> {
+        let needle = self.tree_search.to_ascii_lowercase();
+        self.messages
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| self.tree_filter_keeps(*i, m))
+            .filter(|(_, m)| {
+                if needle.is_empty() {
+                    return true;
+                }
+                m.text.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn tree_filter_keeps(&self, idx: usize, m: &RenderedMessage) -> bool {
+        match self.tree_filter {
+            TreeFilter::All => true,
+            TreeFilter::Default => {
+                // Hide the inline tool-call header lines that look like
+                // "      -> tool call: name(args)". Everything else stays.
+                if m.role == MessageRole::ToolResult
+                    && m.text.trim_start().starts_with("-> tool call:")
+                {
+                    return false;
+                }
+                true
+            }
+            TreeFilter::NoTools => m.role != MessageRole::ToolResult,
+            TreeFilter::UserOnly => m.role == MessageRole::User,
+            TreeFilter::Labeled => self.tree_bookmarks.contains(&idx),
+        }
+    }
+
+    /// Two-Esc detector. Returns true when a second Esc within range should
+    /// open the tree overlay; in that case the caller should NOT also call
+    /// `handle_escape`. False means caller falls through to normal Esc.
+    pub fn maybe_open_tree_on_double_esc(&mut self) -> bool {
+        // Only count Esc as "first press" when the editor + pickers + status
+        // are already in a no-op state — otherwise the first Esc is doing
+        // real work (clearing editor, closing picker, etc.) and we don't
+        // want to surprise the user with a tree overlay on the second.
+        let editor_empty = self.editor.is_empty();
+        let no_pickers = !self.command_picker_visible && !self.file_picker_visible;
+        let no_attachments = self.pending_attachments.is_empty();
+        let not_running = !matches!(self.status, AppStatus::Running);
+        let idle = editor_empty && no_pickers && no_attachments && not_running;
+        if idle {
+            self.esc_press_count = self.esc_press_count.saturating_add(1);
+            if self.esc_press_count >= 2 {
+                self.esc_press_count = 0;
+                self.tree_visible = true;
+                self.tree_cursor = 0;
+                self.tree_search.clear();
+                return true;
+            }
+        } else {
+            self.esc_press_count = 0;
+        }
+        false
+    }
+
+    /// Reset the two-Esc latch — call from the input layer whenever a non-Esc
+    /// key fires.
+    pub fn reset_esc_latch(&mut self) {
+        self.esc_press_count = 0;
+    }
+
+    /// Open or close the hotkeys overlay.
+    pub fn toggle_hotkeys_overlay(&mut self) {
+        self.hotkeys_visible = !self.hotkeys_visible;
+        if self.hotkeys_visible {
+            self.hotkeys_cursor = 0;
+        }
     }
 
     fn push_message(&mut self, message: &AgentMessage) {
@@ -913,9 +1147,38 @@ impl App {
         }
 
         match parsed.name.as_str() {
-            "help" | "hotkeys" => {
+            "help" => {
                 for line in HOTKEY_LINES {
                     self.push_notification((*line).to_string());
+                }
+                SlashOutcome::Handled
+            }
+            "hotkeys" => {
+                self.hotkeys_visible = true;
+                self.hotkeys_cursor = 0;
+                SlashOutcome::Handled
+            }
+            "tree" => {
+                self.tree_visible = true;
+                self.tree_cursor = 0;
+                self.tree_search.clear();
+                SlashOutcome::Handled
+            }
+            "reload" => {
+                self.keybindings = Arc::new(KeybindingsManager::load());
+                let theme_name = self.theme.name.clone();
+                match Theme::load_named(&theme_name) {
+                    Ok(t) => {
+                        self.theme = t;
+                        self.push_notification(format!(
+                            "[slash] reloaded keybindings + theme '{theme_name}'"
+                        ));
+                    }
+                    Err(e) => {
+                        self.push_notification(format!(
+                            "[slash] reloaded keybindings; theme reload failed: {e}"
+                        ));
+                    }
                 }
                 SlashOutcome::Handled
             }
@@ -1344,7 +1607,8 @@ mod tests {
     #[test]
     fn slash_unimplemented_prints_notification() {
         let (mut app, _) = make_app();
-        let out = app.route_slash("/tree");
+        // `/resume` is registered but not yet wired in 0.1.
+        let out = app.route_slash("/resume");
         assert_eq!(out, SlashOutcome::Handled);
         assert!(app
             .messages
@@ -1607,6 +1871,189 @@ mod tests {
         } else {
             panic!("expected user message");
         }
+    }
+
+    #[test]
+    fn toggle_tree_overlay_sets_visibility() {
+        let (mut app, _) = make_app();
+        assert!(!app.tree_visible);
+        app.toggle_tree_overlay();
+        assert!(app.tree_visible);
+        app.toggle_tree_overlay();
+        assert!(!app.tree_visible);
+    }
+
+    #[test]
+    fn tree_filter_cycles_through_five_modes() {
+        let (mut app, _) = make_app();
+        assert_eq!(app.tree_filter, TreeFilter::Default);
+        app.cycle_tree_filter();
+        assert_eq!(app.tree_filter, TreeFilter::NoTools);
+        app.cycle_tree_filter();
+        assert_eq!(app.tree_filter, TreeFilter::UserOnly);
+        app.cycle_tree_filter();
+        assert_eq!(app.tree_filter, TreeFilter::Labeled);
+        app.cycle_tree_filter();
+        assert_eq!(app.tree_filter, TreeFilter::All);
+        app.cycle_tree_filter();
+        assert_eq!(app.tree_filter, TreeFilter::Default);
+    }
+
+    #[test]
+    fn tree_bookmark_toggle_adds_and_removes() {
+        let (mut app, _) = make_app();
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::User,
+            ">>> user: hi".into(),
+            0,
+        ));
+        app.tree_visible = true;
+        app.tree_filter = TreeFilter::All;
+        app.tree_cursor = 0;
+        app.toggle_tree_bookmark();
+        assert!(app.tree_bookmarks.contains(&0));
+        app.toggle_tree_bookmark();
+        assert!(!app.tree_bookmarks.contains(&0));
+    }
+
+    #[test]
+    fn tree_search_filters_messages_by_substring() {
+        let (mut app, _) = make_app();
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::User,
+            ">>> user: alpha".into(),
+            0,
+        ));
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::User,
+            ">>> user: beta".into(),
+            1,
+        ));
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::Assistant,
+            "alphabetic answer".into(),
+            2,
+        ));
+        app.tree_filter = TreeFilter::All;
+        app.tree_search = "alpha".into();
+        let visible = app.visible_tree_indices();
+        // Two messages contain "alpha" (case-insensitive) — index 0 + 2.
+        assert_eq!(visible, vec![0, 2]);
+    }
+
+    #[test]
+    fn tree_show_timestamps_toggles() {
+        let (mut app, _) = make_app();
+        assert!(!app.tree_show_timestamps);
+        app.toggle_tree_timestamps();
+        assert!(app.tree_show_timestamps);
+        app.toggle_tree_timestamps();
+        assert!(!app.tree_show_timestamps);
+    }
+
+    #[test]
+    fn tree_filter_default_hides_tool_call_header_lines() {
+        let (mut app, _) = make_app();
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::User,
+            ">>> user: hi".into(),
+            0,
+        ));
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::ToolResult,
+            "      -> tool call: read({})".into(),
+            1,
+        ));
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::ToolResult,
+            "      [tool ok] body".into(),
+            2,
+        ));
+        let v = app.visible_tree_indices();
+        assert!(v.contains(&0));
+        assert!(!v.contains(&1), "tool call header line should be hidden");
+        assert!(v.contains(&2));
+    }
+
+    #[test]
+    fn tree_filter_no_tools_drops_all_tool_results() {
+        let (mut app, _) = make_app();
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::User,
+            ">>> user: hi".into(),
+            0,
+        ));
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::ToolResult,
+            "      [tool ok] body".into(),
+            1,
+        ));
+        app.tree_filter = TreeFilter::NoTools;
+        let v = app.visible_tree_indices();
+        assert_eq!(v, vec![0]);
+    }
+
+    #[test]
+    fn tree_filter_user_only_keeps_user_messages() {
+        let (mut app, _) = make_app();
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::User,
+            ">>> user: hi".into(),
+            0,
+        ));
+        app.messages.push(RenderedMessage::plain(
+            MessageRole::Assistant,
+            "answer".into(),
+            1,
+        ));
+        app.tree_filter = TreeFilter::UserOnly;
+        let v = app.visible_tree_indices();
+        assert_eq!(v, vec![0]);
+    }
+
+    #[test]
+    fn double_esc_opens_tree_when_idle() {
+        let (mut app, _) = make_app();
+        // Idle, empty editor, no pickers, no attachments.
+        assert!(!app.maybe_open_tree_on_double_esc());
+        // Second consecutive Esc opens.
+        assert!(app.maybe_open_tree_on_double_esc());
+        assert!(app.tree_visible);
+    }
+
+    #[test]
+    fn double_esc_does_not_open_tree_when_editor_dirty() {
+        let (mut app, _) = make_app();
+        app.editor.set("draft");
+        assert!(!app.maybe_open_tree_on_double_esc());
+        assert!(!app.maybe_open_tree_on_double_esc());
+        assert!(!app.tree_visible);
+    }
+
+    #[test]
+    fn slash_tree_opens_overlay() {
+        let (mut app, _) = make_app();
+        let out = app.route_slash("/tree");
+        assert_eq!(out, SlashOutcome::Handled);
+        assert!(app.tree_visible);
+    }
+
+    #[test]
+    fn slash_hotkeys_opens_overlay() {
+        let (mut app, _) = make_app();
+        let out = app.route_slash("/hotkeys");
+        assert_eq!(out, SlashOutcome::Handled);
+        assert!(app.hotkeys_visible);
+    }
+
+    #[test]
+    fn slash_help_does_not_open_overlay() {
+        let (mut app, _) = make_app();
+        let out = app.route_slash("/help");
+        assert_eq!(out, SlashOutcome::Handled);
+        // Legacy /help just dumps notifications.
+        assert!(!app.hotkeys_visible);
+        assert!(!app.tree_visible);
     }
 
     #[test]

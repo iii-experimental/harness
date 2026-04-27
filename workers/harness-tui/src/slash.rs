@@ -88,8 +88,8 @@ impl SlashCommandRegistry {
                 },
                 SlashEntry {
                     name: "tree",
-                    description: "Show session tree",
-                    implemented: false,
+                    description: "Show session tree overlay",
+                    implemented: true,
                 },
                 SlashEntry {
                     name: "resume",
@@ -123,8 +123,8 @@ impl SlashCommandRegistry {
                 },
                 SlashEntry {
                     name: "reload",
-                    description: "Reload configuration",
-                    implemented: false,
+                    description: "Reload theme + keybindings from ~/.harness",
+                    implemented: true,
                 },
             ],
         }
@@ -262,9 +262,13 @@ mod tests {
     #[test]
     fn registry_marks_unimplemented_entries() {
         let r = SlashCommandRegistry::new();
-        let tree = r.get("tree").expect("tree exists");
-        assert!(!tree.implemented);
+        // `resume` ships unimplemented in 0.1.
+        let resume = r.get("resume").expect("resume exists");
+        assert!(!resume.implemented);
         let help = r.get("help").expect("help exists");
         assert!(help.implemented);
+        // `tree` is wired now.
+        let tree = r.get("tree").expect("tree exists");
+        assert!(tree.implemented);
     }
 }

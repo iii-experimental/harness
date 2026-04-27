@@ -12,18 +12,23 @@ pub mod clipboard;
 pub mod fuzzy;
 pub mod image;
 pub mod input;
+pub mod keybindings;
 pub mod markdown;
 pub mod render;
 pub mod sink;
 pub mod slash;
+pub mod slots;
 pub mod theme;
 
 pub use app::{
     App, AppStatus, ImagePayload, MessageRole, PendingAttachment, RenderedMessage,
-    RenderedToolCall, RuntimeHandle, ToolState,
+    RenderedToolCall, RuntimeHandle, ToolState, TreeFilter,
 };
 pub use fuzzy::FuzzyIndex;
 pub use image::{detect_protocol, ImageProtocol};
 pub use input::EditorBuffer;
+pub use keybindings::{Keybinding, KeybindingsFile, KeybindingsManager};
 pub use sink::ChannelSink;
 pub use slash::{parse_slash, ParsedSlash, SlashCommandRegistry, SlashEntry};
+pub use slots::{BuiltinStatus, BuiltinWidget, SlotRegistry, StatusPosition};
+pub use theme::{Theme, ThemeColors, ThemeError, ThemeModifiers};

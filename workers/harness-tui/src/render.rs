@@ -7,23 +7,26 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, AppStatus, MessageRole, RenderedMessage};
+use crate::keybindings::Keybinding;
 use crate::markdown;
 use crate::theme;
 
 const MAX_INPUT_ROWS: u16 = 10;
 
-/// Top-level draw entry point. Header + scrollback + queue/spinner + input +
-/// status bar layout.
+/// Top-level draw entry point. Header + scrollback + widget area + queue
+/// indicator + input + status bar layout. Overlays paint on top.
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let input_inner_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS as usize) as u16;
     let input_height = input_inner_rows + 2; // 2 for borders
+    let widget_height = app.slots.widget_height();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(0),
+            Constraint::Length(widget_height),
             Constraint::Length(1),
             Constraint::Length(input_height),
             Constraint::Length(1),
@@ -32,14 +35,22 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     draw_header(f, chunks[0], app);
     draw_messages(f, chunks[1], app);
-    draw_queue_indicator(f, chunks[2], app);
-    draw_input(f, chunks[3], app);
-    draw_status(f, chunks[4], app);
+    draw_widgets(f, chunks[2], app);
+    draw_queue_indicator(f, chunks[3], app);
+    draw_input(f, chunks[4], app);
+    draw_status(f, chunks[5], app);
 
     if app.command_picker_visible {
-        draw_command_picker(f, chunks[1], chunks[3], app);
+        draw_command_picker(f, chunks[1], chunks[4], app);
     } else if app.file_picker_visible {
-        draw_file_picker(f, chunks[1], chunks[3], app);
+        draw_file_picker(f, chunks[1], chunks[4], app);
+    }
+
+    // Fullscreen overlays sit above everything, including the pickers.
+    if app.tree_visible {
+        draw_tree_overlay(f, area, app);
+    } else if app.hotkeys_visible {
+        draw_hotkeys_overlay(f, area, app);
     }
 }
 
@@ -412,6 +423,203 @@ fn draw_file_picker(f: &mut Frame, msg_area: Rect, input_area: Rect, app: &App) 
     );
     f.render_widget(Clear, area);
     f.render_widget(p, area);
+}
+
+fn draw_widgets(f: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 || app.slots.widgets.is_empty() {
+        return;
+    }
+    let mut y = area.y;
+    let width = area.width;
+    for w in &app.slots.widgets {
+        let h = w.min_height();
+        if y + h > area.y + area.height {
+            break;
+        }
+        let lines = w.render(app, width);
+        let rect = Rect {
+            x: area.x,
+            y,
+            width,
+            height: h,
+        };
+        let p = Paragraph::new(lines);
+        f.render_widget(p, rect);
+        y += h;
+    }
+}
+
+fn draw_tree_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let overlay = centered_rect(area, 90, 90);
+    f.render_widget(Clear, overlay);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Session Tree (Esc to close)")
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(overlay);
+    f.render_widget(block, overlay);
+
+    if inner.height < 4 {
+        return;
+    }
+
+    let header_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let search_line = Line::from(vec![
+        Span::styled("Search: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}_", app.tree_search),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw("  Filter: "),
+        Span::styled(
+            app.tree_filter.label().to_string(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  Bookmarks: "),
+        Span::styled(
+            app.tree_bookmarks.len().to_string(),
+            Style::default().fg(Color::Green),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(search_line), header_chunks[0]);
+
+    let modes_line = Line::from(vec![Span::styled(
+        "Modes: Default | NoTools | UserOnly | Labeled | All  (Ctrl+O cycles)",
+        Style::default().add_modifier(Modifier::DIM),
+    )]);
+    f.render_widget(Paragraph::new(modes_line), header_chunks[1]);
+
+    let visible = app.visible_tree_indices();
+    let body_h = header_chunks[2].height as usize;
+    let cursor = app.tree_cursor.min(visible.len().saturating_sub(1));
+    let scroll_top = if cursor >= body_h {
+        cursor - body_h + 1
+    } else {
+        0
+    };
+
+    let lines: Vec<Line> = visible
+        .iter()
+        .enumerate()
+        .skip(scroll_top)
+        .take(body_h)
+        .map(|(i, idx)| {
+            let m = &app.messages[*idx];
+            let mark = if i == cursor { "▶ " } else { "  " };
+            let role = match m.role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "asst",
+                MessageRole::Thinking => "think",
+                MessageRole::ToolResult => "tool",
+                MessageRole::Notification => "note",
+            };
+            let bookmark = if app.tree_bookmarks.contains(idx) {
+                "*"
+            } else {
+                " "
+            };
+            let ts_prefix = if app.tree_show_timestamps {
+                format!("[{}] ", m.timestamp)
+            } else {
+                String::new()
+            };
+            let preview: String = m.text.chars().take(120).collect();
+            let row = format!("{mark}{bookmark} #{idx:>3} {role:<5} {ts_prefix}{preview}");
+            let style = if i == cursor {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                role_style(m.role)
+            };
+            Line::from(Span::styled(row, style))
+        })
+        .collect();
+
+    let body = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(body, header_chunks[2]);
+
+    let footer = Line::from(vec![Span::styled(
+        "Up/Down move · Enter pivot · Shift+L bookmark · Shift+T timestamps · Esc close",
+        Style::default().add_modifier(Modifier::DIM),
+    )]);
+    f.render_widget(Paragraph::new(footer), header_chunks[3]);
+}
+
+fn role_style(role: MessageRole) -> Style {
+    match role {
+        MessageRole::User => theme::user_style(),
+        MessageRole::Assistant => Style::default(),
+        MessageRole::Thinking => theme::thinking_style(),
+        MessageRole::ToolResult => theme::tool_call_style(),
+        MessageRole::Notification => theme::notification_style(),
+    }
+}
+
+fn draw_hotkeys_overlay(f: &mut Frame, area: Rect, app: &App) {
+    let overlay = centered_rect(area, 80, 80);
+    f.render_widget(Clear, overlay);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Hotkeys (Esc to close)")
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(overlay);
+    f.render_widget(block, overlay);
+
+    if inner.height < 2 {
+        return;
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for section in app.keybindings.sections() {
+        lines.push(Line::from(Span::styled(
+            format!("[{section}]"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        let entries: Vec<Keybinding> = app.keybindings.for_section(section);
+        for b in entries {
+            let row = format!("  {:<24}  {:<14}  {}", b.action, b.key_combo, b.description);
+            lines.push(Line::from(Span::raw(row)));
+        }
+        lines.push(Line::from(Span::raw("")));
+    }
+
+    let body_h = inner.height as usize;
+    let scroll_top = app.hotkeys_cursor.min(lines.len().saturating_sub(body_h));
+
+    let p = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_top as u16, 0));
+    f.render_widget(p, inner);
+}
+
+/// Centred sub-rect computed as a percentage of the parent.
+fn centered_rect(parent: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let w = parent.width * percent_x / 100;
+    let h = parent.height * percent_y / 100;
+    let x = parent.x + (parent.width.saturating_sub(w)) / 2;
+    let y = parent.y + (parent.height.saturating_sub(h)) / 2;
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
 
 #[cfg(test)]

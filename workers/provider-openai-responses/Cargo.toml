@@ -1,6 +1,6 @@
 [package]
 name = "provider-openai-responses"
-description = "stub — implementation pending"
+description = "Streaming client for the OpenAI Responses API. Native event-based wire shape (response.output_text.delta, response.function_call_arguments.delta, etc.); emits AssistantMessageEvents in spec order; never throws — errors are encoded as final error events."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,16 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+provider-base = { path = "../provider-base" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+reqwest = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }

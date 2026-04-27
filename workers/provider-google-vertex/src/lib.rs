@@ -65,8 +65,8 @@ impl VertexConfig {
     pub fn from_env(model: impl Into<String>) -> Result<Self, std::env::VarError> {
         let access_token = std::env::var("GOOGLE_VERTEX_ACCESS_TOKEN")?;
         let project = std::env::var("GOOGLE_VERTEX_PROJECT")?;
-        let region = std::env::var("GOOGLE_VERTEX_REGION")
-            .unwrap_or_else(|_| DEFAULT_REGION.to_string());
+        let region =
+            std::env::var("GOOGLE_VERTEX_REGION").unwrap_or_else(|_| DEFAULT_REGION.to_string());
         Ok(Self {
             access_token,
             project,

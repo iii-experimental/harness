@@ -1,6 +1,6 @@
 [package]
 name = "harness-cli"
-description = "Reference CLI binary for the harness loop. Wires harness-runtime to a real provider (Anthropic) and built-in tools so an agent can run real tasks end-to-end."
+description = "Reference CLI binary for the harness loop. Wires harness-runtime to a runtime-selected provider crate (--provider) and built-in tools so an agent can run real tasks end-to-end."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,6 +14,26 @@ workspace = true
 harness-types = { path = "../harness-types" }
 harness-runtime = { path = "../harness-runtime" }
 provider-anthropic = { path = "../provider-anthropic" }
+provider-openai = { path = "../provider-openai" }
+provider-openai-responses = { path = "../provider-openai-responses" }
+provider-google = { path = "../provider-google" }
+provider-bedrock = { path = "../provider-bedrock" }
+provider-openrouter = { path = "../provider-openrouter" }
+provider-groq = { path = "../provider-groq" }
+provider-cerebras = { path = "../provider-cerebras" }
+provider-xai = { path = "../provider-xai" }
+provider-deepseek = { path = "../provider-deepseek" }
+provider-mistral = { path = "../provider-mistral" }
+provider-fireworks = { path = "../provider-fireworks" }
+provider-kimi-coding = { path = "../provider-kimi-coding" }
+provider-minimax = { path = "../provider-minimax" }
+provider-zai = { path = "../provider-zai" }
+provider-huggingface = { path = "../provider-huggingface" }
+provider-vercel-ai-gateway = { path = "../provider-vercel-ai-gateway" }
+provider-opencode-zen = { path = "../provider-opencode-zen" }
+provider-opencode-go = { path = "../provider-opencode-go" }
+provider-azure-openai = { path = "../provider-azure-openai" }
+provider-google-vertex = { path = "../provider-google-vertex" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

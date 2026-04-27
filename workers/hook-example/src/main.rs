@@ -1,176 +1,85 @@
-//! Demonstrates the `before_tool_call` hook by wrapping `MemoryRuntime` with a
-//! denylist subscriber. The subscriber runs before tool dispatch; if the tool
-//! name is on the denylist, the call is blocked and the loop emits an error
-//! tool result instead of invoking the handler.
+//! Live hook subscriber binary.
 //!
-//! Production wires this through iii pubsub fan-out; here we model it with a
-//! thin trait override so the example is self-contained.
+//! Connects to an iii engine, registers one subscriber on each of the three
+//! hook topics, then idles. Run the harness loop in another process — every
+//! tool call and context transform fans out to this binary.
+//!
+//! Usage:
+//!
+//! ```text
+//! III_URL=ws://localhost:49134 \
+//! HOOK_EXAMPLE_DENY=dangerous,rm \
+//! cargo run -p hook-example
+//! ```
+//!
+//! Environment:
+//! - `III_URL`             — engine WebSocket URL (default: `ws://localhost:49134`)
+//! - `HOOK_EXAMPLE_DENY`   — comma-separated tool names to block in
+//!   `before_tool_call` (default: `dangerous`)
+//! - `HOOK_EXAMPLE_TICK_S` — seconds between counter snapshots (default: `5`)
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::time::Duration;
 
-use async_trait::async_trait;
-use harness_runtime::{
-    run_loop, CapturedEvents, EventSink, HookOutcome, LoopConfig, LoopRuntime, MemoryRuntime,
-    ToolHandler,
-};
-use harness_types::{
-    AgentEvent, AgentMessage, AgentTool, AssistantMessage, ContentBlock, ExecutionMode, StopReason,
-    TextContent, ToolCall, ToolResult, UserMessage,
-};
-
-/// Wraps another runtime and intercepts `before_tool_call` to enforce a
-/// denylist. All other concerns delegate to the inner runtime.
-struct DenylistRuntime<R: LoopRuntime> {
-    inner: R,
-    denied_tools: HashSet<String>,
-}
-
-#[async_trait]
-impl<R: LoopRuntime> LoopRuntime for DenylistRuntime<R> {
-    async fn stream_assistant(
-        &self,
-        session_id: &str,
-        messages: &[AgentMessage],
-        tools: &[AgentTool],
-    ) -> AssistantMessage {
-        self.inner
-            .stream_assistant(session_id, messages, tools)
-            .await
-    }
-
-    async fn resolve_tool(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
-        self.inner.resolve_tool(name).await
-    }
-
-    async fn before_tool_call(&self, tool_call: &ToolCall) -> HookOutcome {
-        if self.denied_tools.contains(&tool_call.name) {
-            return HookOutcome {
-                block: true,
-                reason: Some(format!("denylist blocked: {}", tool_call.name)),
-            };
-        }
-        self.inner.before_tool_call(tool_call).await
-    }
-
-    async fn after_tool_call(&self, tool_call: &ToolCall, result: ToolResult) -> ToolResult {
-        self.inner.after_tool_call(tool_call, result).await
-    }
-
-    async fn transform_context(&self, messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
-        self.inner.transform_context(messages).await
-    }
-
-    async fn drain_steering(&self, session_id: &str) -> Vec<AgentMessage> {
-        self.inner.drain_steering(session_id).await
-    }
-
-    async fn drain_followup(&self, session_id: &str) -> Vec<AgentMessage> {
-        self.inner.drain_followup(session_id).await
-    }
-
-    async fn abort_signal(&self, session_id: &str) -> bool {
-        self.inner.abort_signal(session_id).await
-    }
-}
-
-struct DangerousTool;
-
-#[async_trait]
-impl ToolHandler for DangerousTool {
-    async fn execute(&self, _tool_call: &ToolCall) -> ToolResult {
-        ToolResult {
-            content: vec![ContentBlock::Text(TextContent {
-                text: "this should never run".into(),
-            })],
-            details: serde_json::json!({}),
-            terminate: false,
-        }
-    }
-}
-
-fn user(text: &str) -> AgentMessage {
-    AgentMessage::User(UserMessage {
-        content: vec![ContentBlock::Text(TextContent { text: text.into() })],
-        timestamp: chrono::Utc::now().timestamp_millis(),
-    })
-}
-
-fn assistant_calls(tool: &str, args: serde_json::Value) -> AssistantMessage {
-    AssistantMessage {
-        content: vec![ContentBlock::ToolCall {
-            id: "call-1".into(),
-            name: tool.into(),
-            arguments: args,
-        }],
-        stop_reason: StopReason::Tool,
-        error_message: None,
-        error_kind: None,
-        usage: None,
-        model: "faux".into(),
-        provider: "faux".into(),
-        timestamp: chrono::Utc::now().timestamp_millis(),
-    }
-}
-
-fn assistant_text(text: &str) -> AssistantMessage {
-    AssistantMessage {
-        content: vec![ContentBlock::Text(TextContent { text: text.into() })],
-        stop_reason: StopReason::End,
-        error_message: None,
-        error_kind: None,
-        usage: None,
-        model: "faux".into(),
-        provider: "faux".into(),
-        timestamp: chrono::Utc::now().timestamp_millis(),
-    }
-}
+use hook_example::{register_with_iii, HookExampleConfig};
+use iii_sdk::{register_worker, InitOptions};
 
 #[tokio::main]
-async fn main() {
-    let captured = Arc::new(CapturedEvents::new());
-    let mut inner = MemoryRuntime::new(captured.clone());
-    inner.register_tool("dangerous", Arc::new(DangerousTool));
-
-    inner.queue_assistant(assistant_calls(
-        "dangerous",
-        serde_json::json!({ "command": "rm -rf /" }),
-    ));
-    inner.queue_assistant(assistant_text("loop ended after blocked tool"));
-
-    let denylist: HashSet<String> = std::iter::once("dangerous".to_string()).collect();
-    let rt = DenylistRuntime {
-        inner,
-        denied_tools: denylist,
-    };
-
-    let cfg = LoopConfig {
-        session_id: "hook-demo".into(),
-        tools: vec![AgentTool {
-            name: "dangerous".into(),
-            description: "noop".into(),
-            parameters: serde_json::json!({}),
-            label: "dangerous".into(),
-            execution_mode: ExecutionMode::Parallel,
-            prepare_arguments_supported: false,
-        }],
-        default_execution_mode: ExecutionMode::Parallel,
-    };
-
-    let outcome = run_loop(&rt, &*captured, &cfg, vec![user("trigger blocked tool")]).await;
-
-    let blocked = captured.snapshot().into_iter().any(|e| {
-        matches!(
-            e,
-            AgentEvent::ToolExecutionEnd { is_error, result, .. }
-                if is_error && result.content.iter().any(|c| matches!(c, ContentBlock::Text(t) if t.text.contains("denylist blocked")))
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-    });
+        .try_init()
+        .ok();
 
-    println!("messages: {}", outcome.messages.len());
-    println!("denylist blocked tool call: {blocked}");
-    println!("events emitted: {}", captured.snapshot().len());
+    let url = std::env::var("III_URL").unwrap_or_else(|_| "ws://localhost:49134".to_string());
+    let denied: HashSet<String> = std::env::var("HOOK_EXAMPLE_DENY")
+        .unwrap_or_else(|_| "dangerous".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let tick_s: u64 = std::env::var("HOOK_EXAMPLE_TICK_S")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
 
-    let ev_sink: &dyn EventSink = &*captured;
-    let _ = ev_sink; // suppress unused-import warning by referencing trait
+    println!("hook-example: connecting to {url}");
+    println!("hook-example: denied tools: {denied:?}");
+    let iii = register_worker(&url, InitOptions::default());
+    let subscribers = register_with_iii(
+        &iii,
+        HookExampleConfig {
+            denied_tools: denied,
+        },
+    )?;
+    println!("hook-example: 3 subscribers registered");
+
+    let counters = subscribers.counters.clone();
+    let mut interval = tokio::time::interval(Duration::from_secs(tick_s));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let snap = counters.lock().await;
+                println!(
+                    "before={} (blocked={}) after={} transform={}",
+                    snap.before_seen, snap.before_blocked, snap.after_seen, snap.transform_seen,
+                );
+            }
+            _ = &mut shutdown => {
+                println!("hook-example: shutting down");
+                break;
+            }
+        }
+    }
+
+    subscribers.unregister_all();
+    iii.shutdown();
+    Ok(())
 }

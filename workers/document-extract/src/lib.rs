@@ -204,6 +204,81 @@ fn append_paragraph(p: &docx_rs::Paragraph, out: &mut String) {
     }
 }
 
+/// Registered function ids exposed by [`register_with_iii`].
+pub mod function_ids {
+    pub const EXTRACT: &str = "document::extract";
+}
+
+/// Maximum bytes the `document::extract` iii function will read by default.
+/// Callers can override with the `max_bytes` payload field.
+pub const DEFAULT_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Register the `document::extract` iii function on `iii`.
+///
+/// # Payload
+///
+/// `{ "path": str, "max_bytes": u64? }` — `max_bytes` defaults to
+/// [`DEFAULT_MAX_BYTES`]. The format is sniffed from the file's magic bytes.
+///
+/// Returns `{ "text": str, "page_count": u32?, "metadata": Value,
+/// "detected_format": "pdf" | "docx" | "auto" }`.
+pub fn register_with_iii(iii: &iii_sdk::III) -> DocumentFunctionRefs {
+    use iii_sdk::{IIIError, RegisterFunctionMessage};
+
+    let f = iii.register_function((
+        RegisterFunctionMessage::with_id(function_ids::EXTRACT.into())
+            .with_description("Extract UTF-8 text from a PDF or DOCX file on disk".into()),
+        move |payload: serde_json::Value| async move {
+            let path = payload
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| IIIError::Handler("missing required field: path".into()))?;
+            let max_bytes = payload
+                .get("max_bytes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(DEFAULT_MAX_BYTES);
+
+            let path = std::path::Path::new(path);
+            let metadata = tokio::fs::metadata(path)
+                .await
+                .map_err(|e| IIIError::Handler(format!("stat: {e}")))?;
+            if metadata.len() > max_bytes {
+                return Err(IIIError::Handler(format!(
+                    "file size {} exceeds max_bytes {max_bytes}",
+                    metadata.len()
+                )));
+            }
+            let result = extract(path, DocumentFormat::Auto)
+                .await
+                .map_err(|e| IIIError::Handler(e.to_string()))?;
+            serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    ));
+
+    DocumentFunctionRefs { refs: vec![f] }
+}
+
+/// Handle returned by [`register_with_iii`].
+pub struct DocumentFunctionRefs {
+    refs: Vec<iii_sdk::FunctionRef>,
+}
+
+impl DocumentFunctionRefs {
+    pub fn unregister_all(self) {
+        for f in self.refs {
+            f.unregister();
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.refs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

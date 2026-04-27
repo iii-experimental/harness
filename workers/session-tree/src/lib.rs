@@ -671,6 +671,199 @@ fn html_escape(input: &str) -> String {
     out
 }
 
+/// Registered function ids exposed by [`register_with_iii`].
+pub mod function_ids {
+    pub const FORK: &str = "session::fork";
+    pub const CLONE: &str = "session::clone";
+    pub const COMPACT: &str = "session::compact";
+    pub const TREE: &str = "session::tree";
+    pub const EXPORT_HTML: &str = "session::export_html";
+}
+
+/// Register the five `session::*` iii functions on `iii`, backed by `store`.
+///
+/// Returns a [`SessionFunctionRefs`] handle. Drop or call
+/// [`SessionFunctionRefs::unregister_all`] to deregister everything in one
+/// shot. The Rust API ([`fork`], [`clone_session`], [`compact`], [`tree`],
+/// [`export_html`]) remains available for in-process callers; the iii
+/// functions are thin wrappers over the same impls.
+///
+/// # Payload shapes
+///
+/// - `session::fork` — `{ "source_session_id": str, "from_entry_id": str }`
+///   → `{ "session_id": str }`
+/// - `session::clone` — `{ "source_session_id": str }`
+///   → `{ "session_id": str }`
+/// - `session::compact` — `{ "session_id": str, "summary": str,
+///   "tokens_before": u64, "details": { "read_files": [str],
+///   "modified_files": [str] }, "parent_id": str? }`
+///   → `{ "entry_id": str }`
+/// - `session::tree` — `{ "session_id": str }` → `TreeNode`
+/// - `session::export_html` — `{ "session_id": str, "branch_leaf": str? }`
+///   → `{ "html": str }`
+pub fn register_with_iii<S>(iii: &iii_sdk::III, store: std::sync::Arc<S>) -> SessionFunctionRefs
+where
+    S: SessionStore + Send + Sync + 'static,
+{
+    use iii_sdk::{IIIError, RegisterFunctionMessage};
+    use serde_json::json;
+
+    let mut refs: Vec<iii_sdk::FunctionRef> = Vec::with_capacity(5);
+
+    let store_fork = store.clone();
+    refs.push(
+        iii.register_function((
+            RegisterFunctionMessage::with_id(function_ids::FORK.into())
+                .with_description("Fork a session at a given entry into a new session id".into()),
+            move |payload: serde_json::Value| {
+                let store = store_fork.clone();
+                async move {
+                    let source = required_str(&payload, "source_session_id")?;
+                    let from = required_str(&payload, "from_entry_id")?;
+                    let new_id = fork(store.as_ref(), &source, &from)
+                        .await
+                        .map_err(|e| IIIError::Handler(e.to_string()))?;
+                    Ok(json!({ "session_id": new_id }))
+                }
+            },
+        )),
+    );
+
+    let store_clone = store.clone();
+    refs.push(
+        iii.register_function((
+            RegisterFunctionMessage::with_id(function_ids::CLONE.into())
+                .with_description("Duplicate a session with re-mapped ids".into()),
+            move |payload: serde_json::Value| {
+                let store = store_clone.clone();
+                async move {
+                    let source = required_str(&payload, "source_session_id")?;
+                    let new_id = clone_session(store.as_ref(), &source)
+                        .await
+                        .map_err(|e| IIIError::Handler(e.to_string()))?;
+                    Ok(json!({ "session_id": new_id }))
+                }
+            },
+        )),
+    );
+
+    let store_compact = store.clone();
+    refs.push(
+        iii.register_function((
+            RegisterFunctionMessage::with_id(function_ids::COMPACT.into())
+                .with_description("Append a Compaction entry summarising the active path".into()),
+            move |payload: serde_json::Value| {
+                let store = store_compact.clone();
+                async move {
+                    let session_id = required_str(&payload, "session_id")?;
+                    let summary = required_str(&payload, "summary")?;
+                    let tokens_before = payload
+                        .get("tokens_before")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let details: CompactionDetails = payload
+                        .get("details")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|e| IIIError::Handler(e.to_string()))?
+                        .unwrap_or_default();
+                    let parent_id = payload
+                        .get("parent_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let entry_id = compact(
+                        store.as_ref(),
+                        &session_id,
+                        summary,
+                        details,
+                        parent_id,
+                        tokens_before,
+                    )
+                    .await
+                    .map_err(|e| IIIError::Handler(e.to_string()))?;
+                    Ok(json!({ "entry_id": entry_id }))
+                }
+            },
+        )),
+    );
+
+    let store_tree = store.clone();
+    refs.push(
+        iii.register_function((
+            RegisterFunctionMessage::with_id(function_ids::TREE.into())
+                .with_description("Return the session tree as a nested TreeNode".into()),
+            move |payload: serde_json::Value| {
+                let store = store_tree.clone();
+                async move {
+                    let session_id = required_str(&payload, "session_id")?;
+                    let node = tree(store.as_ref(), &session_id)
+                        .await
+                        .map_err(|e| IIIError::Handler(e.to_string()))?;
+                    serde_json::to_value(node).map_err(|e| IIIError::Handler(e.to_string()))
+                }
+            },
+        )),
+    );
+
+    let store_html = store;
+    refs.push(iii.register_function(
+        (
+            RegisterFunctionMessage::with_id(function_ids::EXPORT_HTML.into()).with_description(
+                "Render the active path as a self-contained HTML document".into(),
+            ),
+            move |payload: serde_json::Value| {
+                let store = store_html.clone();
+                async move {
+                    let session_id = required_str(&payload, "session_id")?;
+                    let leaf = payload
+                        .get("branch_leaf")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let html = export_html(store.as_ref(), &session_id, leaf.as_deref())
+                        .await
+                        .map_err(|e| IIIError::Handler(e.to_string()))?;
+                    Ok(json!({ "html": html }))
+                }
+            },
+        ),
+    ));
+
+    SessionFunctionRefs { refs }
+}
+
+/// Handle returned by [`register_with_iii`]. Drop or call
+/// [`unregister_all`](Self::unregister_all) to remove every registered function.
+pub struct SessionFunctionRefs {
+    refs: Vec<iii_sdk::FunctionRef>,
+}
+
+impl SessionFunctionRefs {
+    /// Unregister every `session::*` function this batch installed.
+    pub fn unregister_all(self) {
+        for f in self.refs {
+            f.unregister();
+        }
+    }
+
+    /// Number of functions registered.
+    pub fn len(&self) -> usize {
+        self.refs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+}
+
+fn required_str(payload: &serde_json::Value, field: &str) -> Result<String, iii_sdk::IIIError> {
+    payload
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| iii_sdk::IIIError::Handler(format!("missing required field: {field}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

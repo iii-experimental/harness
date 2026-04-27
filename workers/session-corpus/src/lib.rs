@@ -419,6 +419,163 @@ pub async fn workspace_status(workspace_dir: &Path) -> Result<WorkspaceStatus, C
     })
 }
 
+/// Registered function ids exposed by [`register_with_iii`].
+pub mod function_ids {
+    pub const SCAN: &str = "corpus::scan";
+    pub const REDACT: &str = "corpus::redact";
+    pub const REVIEW: &str = "corpus::review";
+    pub const PUBLISH: &str = "corpus::publish";
+}
+
+/// Register the four `corpus::*` iii functions on `iii`.
+///
+/// The `review` function delegates to a [`ReviewLlm`] supplied by the caller.
+/// Pass `None` to register a stub that returns `safe_to_publish=true` with an
+/// empty findings list — useful when no LLM reviewer is wired yet.
+///
+/// # Payload shapes
+///
+/// - `corpus::scan` — `{ "session_jsonl": str }` → [`ScanReport`]
+/// - `corpus::redact` — `{ "session_jsonl": str, "secrets": [SecretMatch],
+///   "deny_patterns": [DenyPattern] }` → `{ "redacted": str }`
+/// - `corpus::review` — `{ "redacted_jsonl": str, "custom_prompt": str? }`
+///   → [`ReviewResult`]
+/// - `corpus::publish` — `{ "redacted_jsonl": str, "target": PublishTarget,
+///   "metadata": Value }` → `{ "url": str }`
+pub fn register_with_iii(
+    iii: &iii_sdk::III,
+    reviewer: Option<std::sync::Arc<dyn ReviewLlm>>,
+) -> CorpusFunctionRefs {
+    use iii_sdk::{IIIError, RegisterFunctionMessage};
+    use serde_json::json;
+
+    let mut refs: Vec<iii_sdk::FunctionRef> = Vec::with_capacity(4);
+
+    refs.push(iii.register_function((
+        RegisterFunctionMessage::with_id(function_ids::SCAN.into()).with_description(
+            "Scan session JSONL for secrets via TruffleHog or builtin regex".into(),
+        ),
+        move |payload: serde_json::Value| async move {
+            let session_jsonl = required_str(&payload, "session_jsonl")?;
+            let report = scan_secrets(&session_jsonl)
+                .await
+                .map_err(|e| IIIError::Handler(e.to_string()))?;
+            serde_json::to_value(report).map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    )));
+
+    refs.push(iii.register_function((
+        RegisterFunctionMessage::with_id(function_ids::REDACT.into()).with_description(
+            "Apply secret matches and user deny patterns to session JSONL".into(),
+        ),
+        move |payload: serde_json::Value| async move {
+            let session_jsonl = required_str(&payload, "session_jsonl")?;
+            let secrets: Vec<SecretMatch> = payload
+                .get("secrets")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| IIIError::Handler(e.to_string()))?
+                .unwrap_or_default();
+            let deny: Vec<DenyPattern> = payload
+                .get("deny_patterns")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| IIIError::Handler(e.to_string()))?
+                .unwrap_or_default();
+            let redacted = redact(&session_jsonl, &secrets, &deny)
+                .map_err(|e| IIIError::Handler(e.to_string()))?;
+            Ok(json!({ "redacted": redacted }))
+        },
+    )));
+
+    let reviewer_for_handler = reviewer;
+    refs.push(
+        iii.register_function((
+            RegisterFunctionMessage::with_id(function_ids::REVIEW.into())
+                .with_description("Run an LLM safety review over redacted JSONL".into()),
+            move |payload: serde_json::Value| {
+                let reviewer = reviewer_for_handler.clone();
+                async move {
+                    let redacted_jsonl = required_str(&payload, "redacted_jsonl")?;
+                    let custom_prompt = payload
+                        .get("custom_prompt")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let result = match reviewer {
+                        Some(r) => review(r.as_ref(), &redacted_jsonl, custom_prompt.as_deref())
+                            .await
+                            .map_err(|e| IIIError::Handler(e.to_string()))?,
+                        None => ReviewResult {
+                            safe_to_publish: true,
+                            findings: Vec::new(),
+                            model: "noop".into(),
+                        },
+                    };
+                    serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
+                }
+            },
+        )),
+    );
+
+    refs.push(
+        iii.register_function((
+            RegisterFunctionMessage::with_id(function_ids::PUBLISH.into())
+                .with_description("Upload redacted JSONL to a dataset platform".into()),
+            move |payload: serde_json::Value| async move {
+                let redacted_jsonl = required_str(&payload, "redacted_jsonl")?;
+                let target: PublishTarget = payload
+                    .get("target")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| IIIError::Handler(e.to_string()))?
+                    .ok_or_else(|| IIIError::Handler("missing required field: target".into()))?;
+                let metadata = payload
+                    .get("metadata")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                let url = publish(&redacted_jsonl, &target, metadata)
+                    .await
+                    .map_err(|e| IIIError::Handler(e.to_string()))?;
+                Ok(json!({ "url": url }))
+            },
+        )),
+    );
+
+    CorpusFunctionRefs { refs }
+}
+
+/// Handle returned by [`register_with_iii`].
+pub struct CorpusFunctionRefs {
+    refs: Vec<iii_sdk::FunctionRef>,
+}
+
+impl CorpusFunctionRefs {
+    pub fn unregister_all(self) {
+        for f in self.refs {
+            f.unregister();
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.refs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.refs.is_empty()
+    }
+}
+
+fn required_str(payload: &serde_json::Value, field: &str) -> Result<String, iii_sdk::IIIError> {
+    payload
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| iii_sdk::IIIError::Handler(format!("missing required field: {field}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

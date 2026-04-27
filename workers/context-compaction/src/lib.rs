@@ -319,11 +319,128 @@ fn push_unique_for_tool(
     }
 }
 
+/// Topic and function id constants exposed by [`register_with_iii`].
+pub mod topics {
+    /// Source topic the compactor subscribes to. The agent loop publishes
+    /// `AgentEvent` payloads here.
+    pub const AGENT_EVENTS: &str = "agent::events";
+    /// Sink topic the compactor publishes to when overflow is detected.
+    /// `agent::transform_context` subscribers run before the next turn.
+    pub const TRANSFORM_CONTEXT: &str = "agent::transform_context";
+    /// Function id under which the subscriber handler registers.
+    pub const SUBSCRIBER_FN: &str = "context_compaction::on_event";
+}
+
+/// Decide whether an `AgentEvent` payload (the wire form of [`AgentEvent`])
+/// signals a context-overflow condition that warrants a `transform_context`
+/// publication.
+///
+/// Returns `true` when the message in `MessageEnd`, `TurnEnd`, or
+/// `MessageUpdate` carries `error_kind == "context_overflow"`. Other shapes
+/// (including unrelated event types) return `false` so the subscriber stays a
+/// pure pass-through except on the trigger condition.
+pub fn payload_signals_overflow(payload: &serde_json::Value) -> bool {
+    let kind = payload.get("type").and_then(serde_json::Value::as_str);
+    let Some(kind) = kind else { return false };
+    let message = match kind {
+        "message_end" | "message_start" | "message_update" => payload.get("message"),
+        "turn_end" => payload.get("message"),
+        _ => None,
+    };
+    let Some(message) = message else { return false };
+    // AgentMessage is tagged: {"role": "assistant", "error_kind": "context_overflow", ...}
+    let error_kind = message
+        .get("error_kind")
+        .and_then(serde_json::Value::as_str);
+    matches!(error_kind, Some("context_overflow"))
+}
+
+/// Register the context-compaction subscriber on `iii`.
+///
+/// On startup this:
+/// 1. Registers the function [`topics::SUBSCRIBER_FN`].
+/// 2. Binds it to the [`topics::AGENT_EVENTS`] pubsub topic via a
+///    `subscribe` trigger.
+///
+/// When an event with `error_kind == "context_overflow"` arrives the handler
+/// publishes a payload to [`topics::TRANSFORM_CONTEXT`] so downstream
+/// `transform_context` subscribers can produce a compacted message tail.
+///
+/// Returns a handle that can deregister both refs in one shot.
+pub fn register_with_iii(iii: &iii_sdk::III) -> Result<CompactionSubscriber, iii_sdk::IIIError> {
+    use iii_sdk::{IIIError, RegisterFunctionMessage, RegisterTriggerInput, TriggerAction};
+    use serde_json::json;
+
+    let iii_for_handler = iii.clone();
+    let function_ref = iii.register_function((
+        RegisterFunctionMessage::with_id(topics::SUBSCRIBER_FN.into()).with_description(
+            "Subscriber that watches agent::events for context_overflow signals and \
+                 republishes them as agent::transform_context"
+                .into(),
+        ),
+        move |payload: serde_json::Value| {
+            let iii = iii_for_handler.clone();
+            async move {
+                if !payload_signals_overflow(&payload) {
+                    return Ok(json!({ "ok": true, "compacted": false }));
+                }
+                let request = json!({
+                    "topic": topics::TRANSFORM_CONTEXT,
+                    "data": {
+                        "reason": "context_overflow",
+                        "source_event": payload,
+                    },
+                });
+                iii.trigger(iii_sdk::TriggerRequest {
+                    function_id: "publish".to_string(),
+                    payload: request,
+                    action: Some(TriggerAction::Void),
+                    timeout_ms: None,
+                })
+                .await
+                .map_err(|e| IIIError::Handler(e.to_string()))?;
+                Ok(json!({ "ok": true, "compacted": true }))
+            }
+        },
+    ));
+
+    let trigger = iii.register_trigger(RegisterTriggerInput {
+        trigger_type: "subscribe".to_string(),
+        function_id: topics::SUBSCRIBER_FN.to_string(),
+        config: json!({ "topic": topics::AGENT_EVENTS }),
+        metadata: None,
+    })?;
+
+    Ok(CompactionSubscriber {
+        function_ref: Some(function_ref),
+        trigger: Some(trigger),
+    })
+}
+
+/// Handle returned by [`register_with_iii`].
+pub struct CompactionSubscriber {
+    function_ref: Option<iii_sdk::FunctionRef>,
+    trigger: Option<iii_sdk::Trigger>,
+}
+
+impl CompactionSubscriber {
+    /// Unregister the subscriber and the underlying function.
+    pub fn unregister_all(mut self) {
+        if let Some(t) = self.trigger.take() {
+            t.unregister();
+        }
+        if let Some(f) = self.function_ref.take() {
+            f.unregister();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use harness_types::{
-        AssistantMessage, ContentBlock, StopReason, TextContent, ToolResultMessage, UserMessage,
+        AssistantMessage, ContentBlock, ErrorKind, StopReason, TextContent, ToolResultMessage,
+        UserMessage,
     };
     use session_tree::{append_message, create_session, InMemoryStore};
 
@@ -627,5 +744,59 @@ mod tests {
         assert!((comp.config.threshold_pct - 1.0).abs() < f32::EPSILON);
         comp.config_set_threshold(-1.0);
         assert!((comp.config.threshold_pct - 0.0).abs() < f32::EPSILON);
+    }
+
+    fn assistant_with_overflow() -> AgentMessage {
+        AgentMessage::Assistant(AssistantMessage {
+            content: vec![ContentBlock::Text(TextContent {
+                text: "ran out".into(),
+            })],
+            stop_reason: StopReason::Error,
+            error_message: Some("context window exceeded".into()),
+            error_kind: Some(ErrorKind::ContextOverflow),
+            usage: None,
+            model: "claude-opus-4-7".into(),
+            provider: "anthropic".into(),
+            timestamp: 0,
+        })
+    }
+
+    #[test]
+    fn payload_signals_overflow_message_end() {
+        let event = AgentEvent::MessageEnd {
+            message: assistant_with_overflow(),
+        };
+        let payload = serde_json::to_value(&event).unwrap();
+        assert!(payload_signals_overflow(&payload));
+    }
+
+    #[test]
+    fn payload_signals_overflow_turn_end() {
+        let event = AgentEvent::TurnEnd {
+            message: assistant_with_overflow(),
+            tool_results: Vec::new(),
+        };
+        let payload = serde_json::to_value(&event).unwrap();
+        assert!(payload_signals_overflow(&payload));
+    }
+
+    #[test]
+    fn payload_does_not_signal_when_no_error_kind() {
+        let event = AgentEvent::MessageEnd {
+            message: AgentMessage::User(UserMessage {
+                content: vec![ContentBlock::Text(TextContent { text: "hi".into() })],
+                timestamp: 0,
+            }),
+        };
+        let payload = serde_json::to_value(&event).unwrap();
+        assert!(!payload_signals_overflow(&payload));
+    }
+
+    #[test]
+    fn payload_does_not_signal_for_unrelated_events() {
+        let payload = serde_json::to_value(&AgentEvent::AgentStart).unwrap();
+        assert!(!payload_signals_overflow(&payload));
+        let payload = serde_json::json!({ "type": "tool_execution_start" });
+        assert!(!payload_signals_overflow(&payload));
     }
 }

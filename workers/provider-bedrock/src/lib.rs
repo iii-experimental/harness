@@ -149,29 +149,27 @@ pub async fn collect(mut stream: ReceiverStream<AssistantMessageEvent>) -> Assis
 mod tests {
     use super::*;
 
+    /// Combined env-mutating test. Cargo runs tests in parallel within a crate,
+    /// so splitting these caused a race on `AWS_REGION`. Coverage is identical
+    /// when sequenced.
     #[test]
-    fn from_env_uses_aws_region_when_set() {
+    fn from_env_region_resolution() {
         let prev = std::env::var("AWS_REGION").ok();
+
         std::env::set_var("AWS_REGION", "eu-west-2");
         let cfg = BedrockConfig::from_env("anthropic.claude-3-5-sonnet-20240620-v1:0")
             .expect("env layer reachable");
         assert_eq!(cfg.region.as_deref(), Some("eu-west-2"));
         assert_eq!(cfg.model_id, "anthropic.claude-3-5-sonnet-20240620-v1:0");
         assert_eq!(cfg.max_tokens, 4096);
+
+        std::env::remove_var("AWS_REGION");
+        let cfg2 = BedrockConfig::from_env("anthropic.claude-3-haiku-20240307-v1:0").expect("ok");
+        assert_eq!(cfg2.region.as_deref(), Some(DEFAULT_REGION));
+
         match prev {
             Some(v) => std::env::set_var("AWS_REGION", v),
             None => std::env::remove_var("AWS_REGION"),
-        }
-    }
-
-    #[test]
-    fn from_env_falls_back_to_default_region_when_unset() {
-        let prev = std::env::var("AWS_REGION").ok();
-        std::env::remove_var("AWS_REGION");
-        let cfg = BedrockConfig::from_env("anthropic.claude-3-haiku-20240307-v1:0").expect("ok");
-        assert_eq!(cfg.region.as_deref(), Some(DEFAULT_REGION));
-        if let Some(v) = prev {
-            std::env::set_var("AWS_REGION", v);
         }
     }
 

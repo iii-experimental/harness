@@ -1,6 +1,6 @@
 [package]
 name = "harness-iii-bridge"
-description = "stub — implementation pending"
+description = "Bridge between harness-runtime and iii-engine. Implements LoopRuntime over real iii primitives so the agent loop can run as iii functions on the engine bus."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,17 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+harness-runtime = { path = "../harness-runtime" }
+session-tree = { path = "../session-tree" }
+auth-storage = { path = "../auth-storage" }
+iii-sdk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }

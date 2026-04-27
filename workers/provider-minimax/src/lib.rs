@@ -85,22 +85,24 @@ pub async fn collect(mut stream: ReceiverStream<AssistantMessageEvent>) -> Assis
 mod tests {
     use super::*;
 
+    /// Combined env-mutating test. Cargo runs tests in parallel within a crate,
+    /// so splitting these caused a race on `MINIMAX_API_KEY`. Coverage is identical
+    /// when sequenced.
     #[test]
-    fn config_from_env_missing_returns_err() {
+    fn config_env_resolution() {
         let prev = std::env::var("MINIMAX_API_KEY").ok();
+
         std::env::remove_var("MINIMAX_API_KEY");
         assert!(MiniMaxConfig::from_env("test-model").is_err());
-        if let Some(v) = prev {
-            std::env::set_var("MINIMAX_API_KEY", v);
-        }
-    }
 
-    #[test]
-    fn config_carries_model_and_max_tokens() {
         std::env::set_var("MINIMAX_API_KEY", "test-key");
-        let cfg = MiniMaxConfig::from_env("test-model").unwrap();
+        let cfg = MiniMaxConfig::from_env("test-model").expect("ok");
         assert_eq!(cfg.model, "test-model");
         assert_eq!(cfg.max_tokens, 4096);
-        std::env::remove_var("MINIMAX_API_KEY");
+
+        match prev {
+            Some(v) => std::env::set_var("MINIMAX_API_KEY", v),
+            None => std::env::remove_var("MINIMAX_API_KEY"),
+        }
     }
 }

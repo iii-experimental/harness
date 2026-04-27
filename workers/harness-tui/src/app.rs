@@ -2,12 +2,15 @@
 //! exposes the small `RuntimeHandle` trait that the input layer calls when the
 //! user submits, steers, or aborts a run.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use harness_types::{AgentEvent, AgentMessage, ContentBlock, Usage};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::fuzzy::FuzzyIndex;
 use crate::input::EditorBuffer;
+use crate::slash::{parse_slash, SlashCommandRegistry};
 
 /// High-level loop state surfaced in the status bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,11 +66,22 @@ pub trait RuntimeHandle: Send + Sync {
     fn abort(&self, session_id: &str);
 }
 
+/// Outcome of routing a slash command. Used by the binary to decide whether to
+/// quit, change cwd, etc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlashOutcome {
+    Handled,
+    Quit,
+    Chdir(PathBuf),
+    NotFound,
+}
+
 /// Holds every piece of state the renderer needs.
 pub struct App {
     pub session_id: String,
     pub provider_name: String,
     pub model: String,
+    pub session_name: Option<String>,
     pub cwd: String,
     pub messages: Vec<RenderedMessage>,
     pub tool_calls: Vec<RenderedToolCall>,
@@ -83,6 +97,14 @@ pub struct App {
     pub runtime: Arc<dyn RuntimeHandle>,
     pub should_quit: bool,
     pub context_window: u64,
+    pub slash_registry: SlashCommandRegistry,
+    pub command_picker_visible: bool,
+    pub command_picker_filter: String,
+    pub command_picker_index: usize,
+    pub fuzzy_index: Option<FuzzyIndex>,
+    pub file_picker_visible: bool,
+    pub file_picker_query: String,
+    pub file_picker_index: usize,
 }
 
 impl App {
@@ -98,6 +120,7 @@ impl App {
             session_id,
             provider_name,
             model,
+            session_name: None,
             cwd,
             messages: Vec::new(),
             tool_calls: Vec::new(),
@@ -113,6 +136,14 @@ impl App {
             runtime,
             should_quit: false,
             context_window: 200_000,
+            slash_registry: SlashCommandRegistry::new(),
+            command_picker_visible: false,
+            command_picker_filter: String::new(),
+            command_picker_index: 0,
+            fuzzy_index: None,
+            file_picker_visible: false,
+            file_picker_query: String::new(),
+            file_picker_index: 0,
         }
     }
 
@@ -143,11 +174,7 @@ impl App {
             AgentEvent::MessageStart { message } => {
                 self.push_message(&message);
             }
-            AgentEvent::MessageUpdate { .. } => {
-                // 0.1 renders the final assistant message at MessageStart time
-                // rather than streaming deltas. Streamed deltas land in a later
-                // iteration once we add a "live message" placeholder.
-            }
+            AgentEvent::MessageUpdate { .. } => {}
             AgentEvent::MessageEnd { .. } => {}
             AgentEvent::ToolExecutionStart {
                 tool_call_id,
@@ -256,10 +283,7 @@ impl App {
                     };
                 }
             }
-            AgentMessage::ToolResult(_) => {
-                // Already rendered via ToolExecutionEnd; skipping avoids
-                // double entries.
-            }
+            AgentMessage::ToolResult(_) => {}
             AgentMessage::Custom(c) => {
                 if let Some(d) = &c.display {
                     self.messages.push(RenderedMessage {
@@ -275,10 +299,8 @@ impl App {
     /// Submit the editor buffer as a user message. If idle, returns the text
     /// for the binary to inject as the run's initial prompt; if running, the
     /// message is queued onto the runtime's steering channel.
-    ///
-    /// Returns `Some(text)` only when the loop is idle (caller starts a run).
     pub fn submit_message(&mut self) -> Option<String> {
-        let text = self.editor.take();
+        let text = self.editor.take_text();
         if text.trim().is_empty() {
             return None;
         }
@@ -300,9 +322,31 @@ impl App {
         }
     }
 
+    /// Submit text without consuming the editor (for inline-bash output).
+    pub fn submit_text_as_user(&mut self, text: String) -> Option<String> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        self.history.push(text.clone());
+        self.history_cursor = None;
+        match &self.status {
+            AppStatus::Idle | AppStatus::Aborted | AppStatus::Errored(_) => Some(text),
+            AppStatus::Running => {
+                self.runtime
+                    .enqueue_steering(&self.session_id, user_message(&text));
+                self.messages.push(RenderedMessage {
+                    role: MessageRole::Notification,
+                    text: format!("[steering queued] {text}"),
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                });
+                None
+            }
+        }
+    }
+
     /// Submit as follow-up — agent finishes the current run, then processes.
     pub fn submit_followup(&mut self) -> Option<String> {
-        let text = self.editor.take();
+        let text = self.editor.take_text();
         if text.trim().is_empty() {
             return None;
         }
@@ -324,9 +368,17 @@ impl App {
         }
     }
 
-    /// `Esc` semantics: clear the editor if it has content; otherwise abort
-    /// any running session. Called by input.
+    /// `Esc` semantics: close any open picker first; clear the editor next;
+    /// otherwise abort any running session.
     pub fn handle_escape(&mut self) {
+        if self.command_picker_visible {
+            self.command_picker_visible = false;
+            return;
+        }
+        if self.file_picker_visible {
+            self.file_picker_visible = false;
+            return;
+        }
         if !self.editor.is_empty() {
             self.editor.clear();
             return;
@@ -388,6 +440,291 @@ impl App {
         }
     }
 
+    /// Push a notification line into scrollback.
+    pub fn push_notification(&mut self, text: impl Into<String>) {
+        self.messages.push(RenderedMessage {
+            role: MessageRole::Notification,
+            text: text.into(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        });
+    }
+
+    /// Recompute command picker state from the current editor buffer. Pickers
+    /// are only meaningful when the buffer is single-line and starts with `/`.
+    pub fn refresh_command_picker(&mut self) {
+        let text = self.editor.text();
+        if !self.editor.is_multiline() && text.starts_with('/') {
+            self.command_picker_visible = true;
+            self.command_picker_filter.clone_from(&text);
+            let n = self.slash_registry.match_prefix(&text).len().max(1);
+            if self.command_picker_index >= n {
+                self.command_picker_index = 0;
+            }
+        } else {
+            self.command_picker_visible = false;
+            self.command_picker_filter.clear();
+            self.command_picker_index = 0;
+        }
+    }
+
+    /// Recompute file picker state from the current editor buffer + cursor.
+    pub fn refresh_file_picker(&mut self) {
+        let line = self.editor.current_line();
+        let col = self.editor.cursor_col();
+        let prefix = &line[..col];
+        if let Some(at_idx) = prefix.rfind('@') {
+            let q = &prefix[at_idx + 1..];
+            if q.chars().any(char::is_whitespace) {
+                self.file_picker_visible = false;
+                self.file_picker_query.clear();
+                self.file_picker_index = 0;
+                return;
+            }
+            self.file_picker_visible = true;
+            self.file_picker_query = q.to_string();
+            let limit = self
+                .fuzzy_index
+                .as_ref()
+                .map_or(0, |idx| idx.r#match(&self.file_picker_query, 8).len());
+            if self.file_picker_index >= limit.max(1) {
+                self.file_picker_index = 0;
+            }
+        } else {
+            self.file_picker_visible = false;
+            self.file_picker_query.clear();
+            self.file_picker_index = 0;
+        }
+    }
+
+    pub fn picker_select_prev(&mut self) {
+        if self.command_picker_visible {
+            let n = self
+                .slash_registry
+                .match_prefix(&self.command_picker_filter)
+                .len();
+            if n > 0 {
+                if self.command_picker_index == 0 {
+                    self.command_picker_index = n - 1;
+                } else {
+                    self.command_picker_index -= 1;
+                }
+            }
+        } else if self.file_picker_visible {
+            let n = self
+                .fuzzy_index
+                .as_ref()
+                .map_or(0, |idx| idx.r#match(&self.file_picker_query, 8).len());
+            if n > 0 {
+                if self.file_picker_index == 0 {
+                    self.file_picker_index = n - 1;
+                } else {
+                    self.file_picker_index -= 1;
+                }
+            }
+        }
+    }
+
+    pub fn picker_select_next(&mut self) {
+        if self.command_picker_visible {
+            let n = self
+                .slash_registry
+                .match_prefix(&self.command_picker_filter)
+                .len();
+            if n > 0 {
+                self.command_picker_index = (self.command_picker_index + 1) % n;
+            }
+        } else if self.file_picker_visible {
+            let n = self
+                .fuzzy_index
+                .as_ref()
+                .map_or(0, |idx| idx.r#match(&self.file_picker_query, 8).len());
+            if n > 0 {
+                self.file_picker_index = (self.file_picker_index + 1) % n;
+            }
+        }
+    }
+
+    /// Tab-complete the slash command picker. Returns `true` when a completion
+    /// was applied.
+    pub fn complete_slash(&mut self) -> bool {
+        let cur = self.editor.text();
+        if !cur.starts_with('/') || self.editor.is_multiline() {
+            return false;
+        }
+        if let Some(name) = self.slash_registry.complete(&cur) {
+            let target = format!("/{name}");
+            if target != cur {
+                self.editor.set(target);
+                self.refresh_command_picker();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Tab-complete the highlighted file picker entry.
+    pub fn complete_file(&mut self) -> bool {
+        if !self.file_picker_visible {
+            return false;
+        }
+        let pick = {
+            let idx = match self.fuzzy_index.as_ref() {
+                Some(i) => i,
+                None => return false,
+            };
+            let hits = idx.r#match(&self.file_picker_query, 8);
+            if hits.is_empty() {
+                return false;
+            }
+            let n = self.file_picker_index.min(hits.len() - 1);
+            hits[n].0.to_string_lossy().to_string()
+        };
+
+        let line = self.editor.current_line().to_string();
+        let col = self.editor.cursor_col();
+        let prefix = &line[..col];
+        let at_idx = match prefix.rfind('@') {
+            Some(i) => i,
+            None => return false,
+        };
+
+        let new_line = format!("{}@{} {}", &line[..at_idx], pick, &line[col..]);
+        let new_col = at_idx + 1 + pick.len() + 1;
+
+        let mut full_lines: Vec<String> = self.editor.lines().to_vec();
+        full_lines[self.editor.cursor_row()] = new_line;
+        let row = self.editor.cursor_row();
+        self.editor.set(full_lines.join("\n"));
+        // restore cursor on row.
+        for _ in 0..row {
+            self.editor.move_down();
+        }
+        self.editor.home();
+        for _ in 0..new_col {
+            self.editor.move_right();
+        }
+
+        self.file_picker_visible = false;
+        self.file_picker_query.clear();
+        self.file_picker_index = 0;
+        true
+    }
+
+    /// Route a slash command. Mutates `App` for the simple ones; returns
+    /// `Chdir`/`Quit` for ones the caller has to action against the process.
+    pub fn route_slash(&mut self, line: &str) -> SlashOutcome {
+        let parsed = match parse_slash(line) {
+            Some(p) => p,
+            None => return SlashOutcome::NotFound,
+        };
+        let entry = match self.slash_registry.get(&parsed.name) {
+            Some(e) => e,
+            None => {
+                self.push_notification(format!("[slash] unknown command: /{}", parsed.name));
+                return SlashOutcome::NotFound;
+            }
+        };
+        if !entry.implemented {
+            self.push_notification(format!(
+                "[slash] /{} not yet implemented in this build",
+                parsed.name
+            ));
+            return SlashOutcome::Handled;
+        }
+
+        match parsed.name.as_str() {
+            "help" | "hotkeys" => {
+                for line in HOTKEY_LINES {
+                    self.push_notification((*line).to_string());
+                }
+                SlashOutcome::Handled
+            }
+            "model" => {
+                if parsed.args.is_empty() {
+                    self.push_notification(format!("[slash] current model: {}", self.model));
+                } else {
+                    self.model.clone_from(&parsed.args);
+                    self.push_notification(format!("[slash] model set to {}", parsed.args));
+                }
+                SlashOutcome::Handled
+            }
+            "new" => {
+                self.session_id = format!("tui-{}", chrono::Utc::now().timestamp_millis());
+                self.clear_scrollback();
+                self.usage = Usage::default();
+                self.turn_count = 0;
+                self.session_name = None;
+                self.push_notification(format!("[slash] new session: {}", self.session_id));
+                SlashOutcome::Handled
+            }
+            "name" => {
+                if parsed.args.is_empty() {
+                    self.push_notification("[slash] /name requires a name".to_string());
+                } else {
+                    self.session_name = Some(parsed.args.clone());
+                    self.push_notification(format!("[slash] session name: {}", parsed.args));
+                }
+                SlashOutcome::Handled
+            }
+            "session" => {
+                let name = self.session_name.as_deref().unwrap_or("(unnamed)");
+                self.push_notification(format!(
+                    "[slash] session id={} name={} messages={} turns={} input={} output={}",
+                    self.session_id,
+                    name,
+                    self.messages.len(),
+                    self.turn_count,
+                    self.usage.input,
+                    self.usage.output
+                ));
+                SlashOutcome::Handled
+            }
+            "copy" => match copy_last_assistant(&self.messages) {
+                Ok(s) => {
+                    self.push_notification(format!("[slash] copied {s} bytes to clipboard"));
+                    SlashOutcome::Handled
+                }
+                Err(e) => {
+                    self.push_notification(format!("[slash] copy failed: {e}"));
+                    SlashOutcome::Handled
+                }
+            },
+            "clear" => {
+                self.clear_scrollback();
+                SlashOutcome::Handled
+            }
+            "quit" => {
+                self.should_quit = true;
+                SlashOutcome::Quit
+            }
+            "cwd" => {
+                if parsed.args.is_empty() {
+                    self.push_notification(format!("[slash] cwd: {}", self.cwd));
+                    SlashOutcome::Handled
+                } else {
+                    SlashOutcome::Chdir(PathBuf::from(parsed.args))
+                }
+            }
+            "abort" => {
+                if matches!(self.status, AppStatus::Running) {
+                    self.runtime.abort(&self.session_id);
+                    self.status = AppStatus::Aborted;
+                    self.push_notification("[slash] abort signalled".to_string());
+                } else {
+                    self.push_notification("[slash] no run to abort".to_string());
+                }
+                SlashOutcome::Handled
+            }
+            _ => {
+                self.push_notification(format!(
+                    "[slash] /{} not yet implemented in this build",
+                    parsed.name
+                ));
+                SlashOutcome::Handled
+            }
+        }
+    }
+
     /// Status-bar line. Pulled out so the renderer can right-align it.
     pub fn status_line(&self) -> String {
         let cost = self
@@ -411,6 +748,32 @@ impl App {
             self.turn_count, self.usage.input, self.usage.output, cost, ctx, status
         )
     }
+}
+
+const HOTKEY_LINES: &[&str] = &[
+    "[hotkeys] Enter: submit   Shift+Enter: newline   Alt+Enter: follow-up",
+    "[hotkeys] Esc: clear / abort   Ctrl+C: abort or quit",
+    "[hotkeys] Ctrl+L: clear scrollback   Ctrl+T: toggle tool truncation",
+    "[hotkeys] PgUp/PgDn: scroll   Up/Down: history (single-line) or row nav",
+    "[hotkeys] / opens command picker, Tab completes; @ opens file picker",
+    "[hotkeys] !cmd runs bash and submits result, !!cmd runs and prints only",
+];
+
+fn copy_last_assistant(messages: &[RenderedMessage]) -> Result<usize, String> {
+    let last = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::Assistant)
+        .ok_or_else(|| "no assistant message in scrollback".to_string())?;
+    let text = last
+        .text
+        .strip_prefix("<<< assistant: ")
+        .unwrap_or(&last.text)
+        .to_string();
+    let len = text.len();
+    let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clip.set_text(text).map_err(|e| e.to_string())?;
+    Ok(len)
 }
 
 fn collect_text(blocks: &[ContentBlock]) -> String {
@@ -647,5 +1010,67 @@ mod tests {
         assert_eq!(app.editor.text(), "a");
         app.history_next();
         assert_eq!(app.editor.text(), "b");
+    }
+
+    #[test]
+    fn slash_clear_routes_to_clear_scrollback() {
+        let (mut app, _) = make_app();
+        app.push_notification("noise".to_string());
+        assert_eq!(app.messages.len(), 1);
+        let out = app.route_slash("/clear");
+        assert_eq!(out, SlashOutcome::Handled);
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn slash_quit_returns_quit_and_sets_flag() {
+        let (mut app, _) = make_app();
+        let out = app.route_slash("/quit");
+        assert_eq!(out, SlashOutcome::Quit);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn slash_model_updates_model() {
+        let (mut app, _) = make_app();
+        let out = app.route_slash("/model claude-opus-4");
+        assert_eq!(out, SlashOutcome::Handled);
+        assert_eq!(app.model, "claude-opus-4");
+    }
+
+    #[test]
+    fn slash_unimplemented_prints_notification() {
+        let (mut app, _) = make_app();
+        let out = app.route_slash("/tree");
+        assert_eq!(out, SlashOutcome::Handled);
+        assert!(app
+            .messages
+            .last()
+            .is_some_and(|m| m.text.contains("not yet implemented")));
+    }
+
+    #[test]
+    fn slash_unknown_returns_not_found() {
+        let (mut app, _) = make_app();
+        let out = app.route_slash("/nope");
+        assert_eq!(out, SlashOutcome::NotFound);
+    }
+
+    #[test]
+    fn complete_slash_expands_unique_prefix() {
+        let (mut app, _) = make_app();
+        app.editor.set("/he");
+        app.refresh_command_picker();
+        assert!(app.complete_slash());
+        assert_eq!(app.editor.text(), "/help");
+    }
+
+    #[test]
+    fn refresh_file_picker_detects_at_query() {
+        let (mut app, _) = make_app();
+        app.editor.set("look at @main");
+        app.refresh_file_picker();
+        assert!(app.file_picker_visible);
+        assert_eq!(app.file_picker_query, "main");
     }
 }

@@ -28,6 +28,8 @@ use harness_types::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use harness_tui::app::SlashOutcome;
+use harness_tui::fuzzy::FuzzyIndex;
 use harness_tui::{App, AppStatus, ChannelSink, RuntimeHandle};
 
 const DEFAULT_PROVIDER: &str = "anthropic";
@@ -731,10 +733,11 @@ async fn async_main() -> Result<()> {
         session_id.clone(),
         args.provider.clone(),
         model,
-        cwd,
+        cwd.clone(),
         rx,
         runtime_handle,
     );
+    app.fuzzy_index = Some(FuzzyIndex::index(&PathBuf::from(&cwd)));
 
     // Optionally kick off a run with the initial prompt argument.
     if let Some(initial) = args.prompt.clone() {
@@ -825,10 +828,10 @@ fn handle_key(
 ) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
-    match (key.code, ctrl, alt) {
-        (KeyCode::Char('c'), true, _) => {
-            // Ctrl+C: abort first if running, else quit.
+    match (key.code, ctrl, alt, shift) {
+        (KeyCode::Char('c'), true, _, _) => {
             if matches!(app.status, AppStatus::Running) {
                 app.runtime.abort(&app.session_id);
                 app.status = AppStatus::Aborted;
@@ -836,32 +839,124 @@ fn handle_key(
                 app.should_quit = true;
             }
         }
-        (KeyCode::Char('l'), true, _) => app.clear_scrollback(),
-        (KeyCode::Char('t'), true, _) => app.toggle_tool_truncation(),
-        (KeyCode::Char('w'), true, _) => app.editor.delete_word_back(),
-        (KeyCode::Char(c), false, _) => app.editor.insert_char(c),
-        (KeyCode::Char(c), true, _) if c.is_ascii_alphabetic() => {
-            // Other Ctrl+<letter> chords are absorbed.
+        (KeyCode::Char('l'), true, _, _) => app.clear_scrollback(),
+        (KeyCode::Char('t'), true, _, _) => app.toggle_tool_truncation(),
+        (KeyCode::Char('w'), true, _, _) => {
+            app.editor.delete_word_back();
+            app.refresh_command_picker();
+            app.refresh_file_picker();
+        }
+        (KeyCode::Tab, _, _, _) => {
+            if app.command_picker_visible {
+                app.complete_slash();
+            } else if app.file_picker_visible {
+                app.complete_file();
+            }
+        }
+        (KeyCode::Char(c), false, _, _) => {
+            app.editor.insert_char(c);
+            app.refresh_command_picker();
+            app.refresh_file_picker();
+        }
+        (KeyCode::Char(c), true, _, _) if c.is_ascii_alphabetic() => {
             let _ = c;
         }
-        (KeyCode::Backspace, _, _) => app.editor.delete_back(),
-        (KeyCode::Delete, _, _) => app.editor.delete_forward(),
-        (KeyCode::Left, _, _) => app.editor.move_left(),
-        (KeyCode::Right, _, _) => app.editor.move_right(),
-        (KeyCode::Home, _, _) => app.editor.home(),
-        (KeyCode::End, _, _) => app.editor.end(),
-        (KeyCode::Up, _, _) => app.history_prev(),
-        (KeyCode::Down, _, _) => app.history_next(),
-        (KeyCode::PageUp, _, _) => app.scroll_up(5),
-        (KeyCode::PageDown, _, _) => app.scroll_down(5),
-        (KeyCode::Esc, _, _) => app.handle_escape(),
-        (KeyCode::Enter, _, true) => {
+        (KeyCode::Backspace, _, _, _) => {
+            app.editor.delete_back();
+            app.refresh_command_picker();
+            app.refresh_file_picker();
+        }
+        (KeyCode::Delete, _, _, _) => {
+            app.editor.delete_forward();
+            app.refresh_command_picker();
+            app.refresh_file_picker();
+        }
+        (KeyCode::Left, _, _, _) => {
+            app.editor.move_left();
+            app.refresh_file_picker();
+        }
+        (KeyCode::Right, _, _, _) => {
+            app.editor.move_right();
+            app.refresh_file_picker();
+        }
+        (KeyCode::Home, _, _, _) => app.editor.home(),
+        (KeyCode::End, _, _, _) => app.editor.end(),
+        (KeyCode::Up, _, _, _) => {
+            if app.command_picker_visible || app.file_picker_visible {
+                app.picker_select_prev();
+            } else if app.editor.is_multiline() && !app.editor.cursor_at_first_row() {
+                app.editor.move_up();
+            } else {
+                app.history_prev();
+            }
+        }
+        (KeyCode::Down, _, _, _) => {
+            if app.command_picker_visible || app.file_picker_visible {
+                app.picker_select_next();
+            } else if app.editor.is_multiline() && !app.editor.cursor_at_last_row() {
+                app.editor.move_down();
+            } else {
+                app.history_next();
+            }
+        }
+        (KeyCode::PageUp, _, _, _) => app.scroll_up(5),
+        (KeyCode::PageDown, _, _, _) => app.scroll_down(5),
+        (KeyCode::Esc, _, _, _) => app.handle_escape(),
+        (KeyCode::Enter, _, _, true) => {
+            // Shift+Enter inserts a newline regardless of picker state.
+            app.editor.insert_newline();
+            app.refresh_command_picker();
+            app.refresh_file_picker();
+        }
+        (KeyCode::Enter, _, true, false) => {
+            // Pickers absorbed elsewhere; Alt+Enter is follow-up.
+            let raw = app.editor.text();
+            if maybe_handle_inline_bash(
+                app,
+                &raw,
+                runtime_arc.clone(),
+                sink_arc.clone(),
+                loop_cfg,
+                max_turns,
+                /* followup */ true,
+            ) {
+                return;
+            }
+            if maybe_handle_slash(app, &raw) {
+                app.editor.clear();
+                return;
+            }
             if let Some(text) = app.submit_followup() {
                 spawn_run(runtime_arc, sink_arc, loop_cfg.clone(), text, max_turns);
                 app.status = AppStatus::Running;
             }
         }
-        (KeyCode::Enter, _, false) => {
+        (KeyCode::Enter, _, false, false) => {
+            if app.command_picker_visible {
+                app.complete_slash();
+                app.command_picker_visible = false;
+                return;
+            }
+            if app.file_picker_visible {
+                app.complete_file();
+                return;
+            }
+            let raw = app.editor.text();
+            if maybe_handle_inline_bash(
+                app,
+                &raw,
+                runtime_arc.clone(),
+                sink_arc.clone(),
+                loop_cfg,
+                max_turns,
+                /* followup */ false,
+            ) {
+                return;
+            }
+            if maybe_handle_slash(app, &raw) {
+                app.editor.clear();
+                return;
+            }
             if let Some(text) = app.submit_message() {
                 spawn_run(runtime_arc, sink_arc, loop_cfg.clone(), text, max_turns);
                 app.status = AppStatus::Running;
@@ -869,6 +964,101 @@ fn handle_key(
         }
         _ => {}
     }
+}
+
+/// Returns true when the text was a slash command (and was routed). Performs
+/// process-level side effects (chdir, quit) the App can't.
+fn maybe_handle_slash(app: &mut App, text: &str) -> bool {
+    let trimmed = text.trim_end();
+    if !trimmed.starts_with('/') {
+        return false;
+    }
+    match app.route_slash(trimmed) {
+        SlashOutcome::Handled => true,
+        SlashOutcome::Quit => {
+            app.should_quit = true;
+            true
+        }
+        SlashOutcome::Chdir(path) => {
+            match std::env::set_current_dir(&path) {
+                Ok(()) => {
+                    app.cwd = path.display().to_string();
+                    app.fuzzy_index = Some(FuzzyIndex::index(&path));
+                    app.push_notification(format!("[slash] cwd: {}", app.cwd));
+                }
+                Err(e) => {
+                    app.push_notification(format!("[slash] cwd failed: {e}"));
+                }
+            }
+            true
+        }
+        SlashOutcome::NotFound => true,
+    }
+}
+
+/// Run an inline `!cmd` or `!!cmd` and either submit the output as a user
+/// message or print it to scrollback. Returns true when the text matched the
+/// inline-bash prefix and was handled.
+fn maybe_handle_inline_bash(
+    app: &mut App,
+    text: &str,
+    runtime_arc: Arc<ProviderRuntime>,
+    sink_arc: Arc<dyn EventSink>,
+    loop_cfg: &LoopConfig,
+    max_turns: usize,
+    followup: bool,
+) -> bool {
+    let parsed = match harness_tui::bash::parse(text) {
+        Some(p) => p,
+        None => return false,
+    };
+    app.editor.clear();
+    if parsed.command.is_empty() {
+        app.push_notification("[bash] empty command".to_string());
+        return true;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let output = std::process::Command::new("bash")
+        .arg("-lc")
+        .arg(&parsed.command)
+        .current_dir(&cwd)
+        .output();
+    let body = match output {
+        Ok(o) => {
+            let mut combined = String::new();
+            if !o.stdout.is_empty() {
+                combined.push_str(&String::from_utf8_lossy(&o.stdout));
+            }
+            if !o.stderr.is_empty() {
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&String::from_utf8_lossy(&o.stderr));
+            }
+            let exit = o.status.code().unwrap_or(-1);
+            format!("exit={exit}\n{combined}")
+        }
+        Err(e) => format!("bash spawn failed: {e}"),
+    };
+
+    let formatted = harness_tui::bash::format_for_submission(&parsed.command, &body);
+    if parsed.silent {
+        for line in formatted.lines() {
+            app.push_notification(line.to_string());
+        }
+        return true;
+    }
+
+    let _ = followup;
+    if matches!(app.status, AppStatus::Running) {
+        app.runtime
+            .enqueue_steering(&app.session_id, harness_tui::app::user_message(&formatted));
+        app.push_notification(format!("[bash steered] {}", parsed.command));
+    } else if let Some(text) = app.submit_text_as_user(formatted) {
+        spawn_run(runtime_arc, sink_arc, loop_cfg.clone(), text, max_turns);
+        app.status = AppStatus::Running;
+    }
+    true
 }
 
 /// Spawn the agent loop for one initial prompt on the tokio runtime. The

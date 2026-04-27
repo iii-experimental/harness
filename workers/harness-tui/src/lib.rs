@@ -7,13 +7,18 @@
 //! follow-up messages on the runtime.
 
 pub mod app;
+pub mod bash;
+pub mod fuzzy;
 pub mod input;
 pub mod render;
 pub mod sink;
+pub mod slash;
 pub mod theme;
 
 pub use app::{
     App, AppStatus, MessageRole, RenderedMessage, RenderedToolCall, RuntimeHandle, ToolState,
 };
+pub use fuzzy::FuzzyIndex;
 pub use input::EditorBuffer;
 pub use sink::ChannelSink;
+pub use slash::{parse_slash, ParsedSlash, SlashCommandRegistry, SlashEntry};

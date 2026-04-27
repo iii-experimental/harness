@@ -1,6 +1,6 @@
 [package]
 name = "harness-tui"
-description = "stub - ratatui interactive TUI pending"
+description = "Interactive terminal UI for the harness agent loop, rendered with ratatui + crossterm."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,41 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+harness-runtime = { path = "../harness-runtime" }
+provider-anthropic = { path = "../provider-anthropic" }
+provider-openai = { path = "../provider-openai" }
+provider-openai-responses = { path = "../provider-openai-responses" }
+provider-google = { path = "../provider-google" }
+provider-bedrock = { path = "../provider-bedrock" }
+provider-openrouter = { path = "../provider-openrouter" }
+provider-groq = { path = "../provider-groq" }
+provider-cerebras = { path = "../provider-cerebras" }
+provider-xai = { path = "../provider-xai" }
+provider-deepseek = { path = "../provider-deepseek" }
+provider-mistral = { path = "../provider-mistral" }
+provider-fireworks = { path = "../provider-fireworks" }
+provider-kimi-coding = { path = "../provider-kimi-coding" }
+provider-minimax = { path = "../provider-minimax" }
+provider-zai = { path = "../provider-zai" }
+provider-huggingface = { path = "../provider-huggingface" }
+provider-vercel-ai-gateway = { path = "../provider-vercel-ai-gateway" }
+provider-opencode-zen = { path = "../provider-opencode-zen" }
+provider-opencode-go = { path = "../provider-opencode-go" }
+provider-azure-openai = { path = "../provider-azure-openai" }
+provider-google-vertex = { path = "../provider-google-vertex" }
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { workspace = true }
+tokio-stream = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+[[bin]]
+name = "harness-tui"
+path = "src/main.rs"

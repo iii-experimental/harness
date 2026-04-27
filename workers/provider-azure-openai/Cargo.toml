@@ -1,6 +1,6 @@
 [package]
 name = "provider-azure-openai"
-description = "stub — implementation pending"
+description = "Streaming client for the OpenAI Responses API hosted on Azure. Same wire shape as provider-openai-responses; differs only in URL (resource + api-version) and auth header (api-key, not Bearer)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,3 +9,16 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+provider-base = { path = "../provider-base" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+reqwest = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }

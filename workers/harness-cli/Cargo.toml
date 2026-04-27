@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 harness-types = { path = "../harness-types" }
 harness-runtime = { path = "../harness-runtime" }
+harness-iii-bridge = { path = "../harness-iii-bridge" }
+iii-sdk = { workspace = true }
 provider-anthropic = { path = "../provider-anthropic" }
 provider-openai = { path = "../provider-openai" }
 provider-openai-responses = { path = "../provider-openai-responses" }

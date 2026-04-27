@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use harness_iii_bridge::{IiiSdkClient, SandboxedBashTool};
 use harness_runtime::{
     run_loop, EventSink, HookOutcome, LoopConfig, LoopRuntime, MemoryRuntime, ToolHandler,
 };
@@ -21,9 +22,12 @@ use harness_types::{
     AgentEvent, AgentMessage, AgentTool, AssistantMessage, ContentBlock, ExecutionMode, StopReason,
     TextContent, ToolCall, ToolResult, UserMessage,
 };
+use iii_sdk::{register_worker, InitOptions};
 
 const DEFAULT_PROVIDER: &str = "anthropic";
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a coding assistant running on the iii harness. Use the tools provided to inspect and modify files. Keep responses focused and concrete.";
+const DEFAULT_ENGINE_URL: &str = "ws://127.0.0.1:49134";
+const DEFAULT_SANDBOX_IMAGE: &str = "python";
 
 /// Tagged config for the selected provider. Each variant owns the typed
 /// `Config` from its crate; `stream_assistant` matches and dispatches to that
@@ -453,6 +457,9 @@ struct CliArgs {
     model: Option<String>,
     max_turns: usize,
     no_bash: bool,
+    via_iii: bool,
+    sandbox_image: String,
+    engine_url: String,
 }
 
 /// Parse argv. Pulled into its own function so the unit tests can exercise it
@@ -463,6 +470,9 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
     let mut model: Option<String> = None;
     let mut max_turns = 10usize;
     let mut no_bash = false;
+    let mut via_iii = false;
+    let mut sandbox_image = DEFAULT_SANDBOX_IMAGE.to_string();
+    let mut engine_url = DEFAULT_ENGINE_URL.to_string();
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -492,9 +502,30 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
                 no_bash = true;
                 i += 1;
             }
+            "--via-iii" => {
+                via_iii = true;
+                i += 1;
+            }
+            "--sandbox-image" => {
+                sandbox_image = raw
+                    .get(i + 1)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("--sandbox-image requires a value"))?;
+                i += 2;
+            }
+            "--engine-url" => {
+                engine_url = raw
+                    .get(i + 1)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("--engine-url requires a value"))?;
+                i += 2;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
+            }
+            other if other.starts_with("--") => {
+                anyhow::bail!("unknown flag '{other}'. Run with --help for the supported list.");
             }
             other => {
                 if prompt.is_none() {
@@ -519,6 +550,9 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
         model,
         max_turns,
         no_bash,
+        via_iii,
+        sandbox_image,
+        engine_url,
     })
 }
 
@@ -678,10 +712,16 @@ fn print_help() {
     println!("Usage: harness [options] <prompt>");
     println!();
     println!("Options:");
-    println!("  --provider <name>   provider crate to use (default: {DEFAULT_PROVIDER})");
-    println!("  --model <id>        provider model id (default depends on --provider)");
-    println!("  --max-turns <n>     stop after n turns (default: 10)");
-    println!("  --no-bash           disable bash tool (read-only mode)");
+    println!("  --provider <name>      provider crate to use (default: {DEFAULT_PROVIDER})");
+    println!("  --model <id>           provider model id (default depends on --provider)");
+    println!("  --max-turns <n>        stop after n turns (default: 10)");
+    println!("  --no-bash              disable bash tool (read-only mode)");
+    println!("  --via-iii              dispatch the bash tool through the iii-engine");
+    println!("                         sandbox (sandbox::create + sandbox::exec) instead");
+    println!("                         of running it in-process. Requires a running engine");
+    println!("                         on --engine-url with the iii-sandbox worker loaded.");
+    println!("  --sandbox-image <name> catalog image used for --via-iii (default: {DEFAULT_SANDBOX_IMAGE})");
+    println!("  --engine-url <url>     iii-engine WebSocket URL (default: {DEFAULT_ENGINE_URL})");
     println!();
     println!("Supported providers:");
     println!("  anthropic           env: ANTHROPIC_API_KEY");
@@ -739,12 +779,27 @@ async fn main() -> Result<()> {
     inner.register_tool("grep", Arc::new(harness_runtime::tools::GrepTool));
     inner.register_tool("find", Arc::new(harness_runtime::tools::FindTool));
     if !args.no_bash {
-        inner.register_tool(
-            "bash",
-            Arc::new(BashTool {
-                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            }),
-        );
+        if args.via_iii {
+            let client = connect_iii(&args.engine_url).await?;
+            println!(
+                "via iii-engine, sandbox image: {} (default)",
+                args.sandbox_image
+            );
+            inner.register_tool(
+                "bash",
+                Arc::new(SandboxedBashTool::with_image(
+                    Arc::new(client),
+                    args.sandbox_image.clone(),
+                )),
+            );
+        } else {
+            inner.register_tool(
+                "bash",
+                Arc::new(BashTool {
+                    cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                }),
+            );
+        }
     }
 
     let runtime = ProviderRuntime {
@@ -796,6 +851,33 @@ async fn main() -> Result<()> {
     eprintln!("tool results: {tool_result_count}");
 
     Ok(())
+}
+
+/// Connect to the iii-engine over WebSocket and verify the connection is
+/// alive by issuing one bus round-trip. On failure, print a diagnostic to
+/// stderr and exit with code 2 — consistent with the other "preflight"
+/// failures in this CLI.
+async fn connect_iii(engine_url: &str) -> Result<IiiSdkClient> {
+    let iii = register_worker(engine_url, InitOptions::default());
+    let handle = Arc::new(iii);
+    let client = IiiSdkClient::new(handle.clone());
+    let probe =
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.list_functions()).await;
+    match probe {
+        Ok(Ok(_)) => Ok(client),
+        Ok(Err(e)) => {
+            eprintln!(
+                "failed to connect to iii engine at {engine_url}; start the engine or omit --via-iii ({e})"
+            );
+            std::process::exit(2);
+        }
+        Err(_) => {
+            eprintln!(
+                "failed to connect to iii engine at {engine_url}; start the engine or omit --via-iii"
+            );
+            std::process::exit(2);
+        }
+    }
 }
 
 async fn run_loop_with_max_turns<R: LoopRuntime, S: EventSink>(
@@ -860,6 +942,56 @@ mod tests {
         .expect("parse ok");
         assert_eq!(parsed.provider, "google");
         assert_eq!(parsed.model.as_deref(), Some("gemini-1.5-pro"));
+    }
+
+    #[test]
+    fn parse_args_default_via_iii_off_and_default_sandbox_image_and_engine_url() {
+        let parsed = parse_args_from(&args(&["hi"])).expect("parse ok");
+        assert!(!parsed.via_iii);
+        assert_eq!(parsed.sandbox_image, "python");
+        assert_eq!(parsed.engine_url, "ws://127.0.0.1:49134");
+    }
+
+    #[test]
+    fn parse_args_recognises_via_iii_flag() {
+        let parsed = parse_args_from(&args(&["--via-iii", "hello"])).expect("parse ok");
+        assert!(parsed.via_iii);
+        assert_eq!(parsed.prompt, "hello");
+    }
+
+    #[test]
+    fn parse_args_threads_through_sandbox_image_and_engine_url() {
+        let parsed = parse_args_from(&args(&[
+            "--via-iii",
+            "--sandbox-image",
+            "node",
+            "--engine-url",
+            "ws://10.0.0.5:49134",
+            "go",
+        ]))
+        .expect("parse ok");
+        assert!(parsed.via_iii);
+        assert_eq!(parsed.sandbox_image, "node");
+        assert_eq!(parsed.engine_url, "ws://10.0.0.5:49134");
+        assert_eq!(parsed.prompt, "go");
+    }
+
+    #[test]
+    fn parse_args_rejects_unknown_flag() {
+        let err = parse_args_from(&args(&["--made-up", "hi"]));
+        assert!(err.is_err());
+        let msg = err.err().unwrap().to_string();
+        assert!(msg.contains("unknown flag"), "msg: {msg}");
+    }
+
+    /// Integration check that hits a real iii-engine. Gated with `#[ignore]`
+    /// because it requires a running engine on ws://127.0.0.1:49134 with the
+    /// iii-sandbox worker loaded.
+    #[tokio::test]
+    #[ignore = "requires running iii engine"]
+    async fn connect_iii_against_live_engine() {
+        let client = connect_iii("ws://127.0.0.1:49134").await.expect("connect");
+        let _ = client; // smoke: handle drops cleanly
     }
 
     #[test]

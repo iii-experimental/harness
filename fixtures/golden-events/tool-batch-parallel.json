@@ -1,0 +1,278 @@
+[
+  {
+    "type": "agent_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "read /tmp/x and /tmp/y",
+          "type": "text"
+        }
+      ],
+      "role": "user",
+      "timestamp": 0
+    },
+    "type": "message_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "read /tmp/x and /tmp/y",
+          "type": "text"
+        }
+      ],
+      "role": "user",
+      "timestamp": 0
+    },
+    "type": "message_end"
+  },
+  {
+    "type": "turn_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "arguments": {
+            "text": "x-result"
+          },
+          "id": "call-1",
+          "name": "echo",
+          "type": "toolCall"
+        }
+      ],
+      "model": "faux-model",
+      "provider": "faux",
+      "role": "assistant",
+      "stop_reason": "tool",
+      "timestamp": 0
+    },
+    "type": "message_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "arguments": {
+            "text": "x-result"
+          },
+          "id": "call-1",
+          "name": "echo",
+          "type": "toolCall"
+        }
+      ],
+      "model": "faux-model",
+      "provider": "faux",
+      "role": "assistant",
+      "stop_reason": "tool",
+      "timestamp": 0
+    },
+    "type": "message_end"
+  },
+  {
+    "args": {
+      "text": "x-result"
+    },
+    "tool_call_id": "call-1",
+    "tool_name": "echo",
+    "type": "tool_execution_start"
+  },
+  {
+    "is_error": false,
+    "result": {
+      "content": [
+        {
+          "text": "x-result",
+          "type": "text"
+        }
+      ],
+      "details": {},
+      "terminate": false
+    },
+    "tool_call_id": "call-1",
+    "tool_name": "echo",
+    "type": "tool_execution_end"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "x-result",
+          "type": "text"
+        }
+      ],
+      "details": {},
+      "is_error": false,
+      "role": "tool_result",
+      "timestamp": 0,
+      "tool_call_id": "call-1",
+      "tool_name": "echo"
+    },
+    "type": "message_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "x-result",
+          "type": "text"
+        }
+      ],
+      "details": {},
+      "is_error": false,
+      "role": "tool_result",
+      "timestamp": 0,
+      "tool_call_id": "call-1",
+      "tool_name": "echo"
+    },
+    "type": "message_end"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "arguments": {
+            "text": "x-result"
+          },
+          "id": "call-1",
+          "name": "echo",
+          "type": "toolCall"
+        }
+      ],
+      "model": "faux-model",
+      "provider": "faux",
+      "role": "assistant",
+      "stop_reason": "tool",
+      "timestamp": 0
+    },
+    "tool_results": [
+      {
+        "content": [
+          {
+            "text": "x-result",
+            "type": "text"
+          }
+        ],
+        "details": {},
+        "is_error": false,
+        "timestamp": 0,
+        "tool_call_id": "call-1",
+        "tool_name": "echo"
+      }
+    ],
+    "type": "turn_end"
+  },
+  {
+    "type": "turn_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "done",
+          "type": "text"
+        }
+      ],
+      "model": "faux-model",
+      "provider": "faux",
+      "role": "assistant",
+      "stop_reason": "end",
+      "timestamp": 0
+    },
+    "type": "message_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "done",
+          "type": "text"
+        }
+      ],
+      "model": "faux-model",
+      "provider": "faux",
+      "role": "assistant",
+      "stop_reason": "end",
+      "timestamp": 0
+    },
+    "type": "message_end"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "done",
+          "type": "text"
+        }
+      ],
+      "model": "faux-model",
+      "provider": "faux",
+      "role": "assistant",
+      "stop_reason": "end",
+      "timestamp": 0
+    },
+    "tool_results": [],
+    "type": "turn_end"
+  },
+  {
+    "messages": [
+      {
+        "content": [
+          {
+            "text": "read /tmp/x and /tmp/y",
+            "type": "text"
+          }
+        ],
+        "role": "user",
+        "timestamp": 0
+      },
+      {
+        "content": [
+          {
+            "arguments": {
+              "text": "x-result"
+            },
+            "id": "call-1",
+            "name": "echo",
+            "type": "toolCall"
+          }
+        ],
+        "model": "faux-model",
+        "provider": "faux",
+        "role": "assistant",
+        "stop_reason": "tool",
+        "timestamp": 0
+      },
+      {
+        "content": [
+          {
+            "text": "x-result",
+            "type": "text"
+          }
+        ],
+        "details": {},
+        "is_error": false,
+        "role": "tool_result",
+        "timestamp": 0,
+        "tool_call_id": "call-1",
+        "tool_name": "echo"
+      },
+      {
+        "content": [
+          {
+            "text": "done",
+            "type": "text"
+          }
+        ],
+        "model": "faux-model",
+        "provider": "faux",
+        "role": "assistant",
+        "stop_reason": "end",
+        "timestamp": 0
+      }
+    ],
+    "type": "agent_end"
+  }
+]

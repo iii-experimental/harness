@@ -1,0 +1,25 @@
+[package]
+name = "hook-example"
+description = "Demonstrates harness pubsub-style hook fan-out: a before_tool_call subscriber blocks tool calls matching a denylist before they reach the handler."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-types = { path = "../harness-types" }
+harness-runtime = { path = "../harness-runtime" }
+provider-faux = { path = "../provider-faux" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+
+[[bin]]
+name = "hook-example"
+path = "src/main.rs"

@@ -65,4 +65,5 @@ Crates with 90+ days production use, no breaking releases for 30+ days, real dow
 
 ## Status
 
-- P0 day 1 in progress (workspace scaffolded; harness-types + overflow-classify next)
+- 0.1.0 released 2026-04-27. Foundational crates plus working loop with replay-tested semantics.
+- P1 in progress: provider workers, oauth crates, iii-engine bridge.

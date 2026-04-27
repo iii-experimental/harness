@@ -9,6 +9,8 @@ members = [
     "workers/provider-faux",
     "workers/harness-runtime",
     "workers/fixtures-gen",
+    "workers/replay-test",
+    "workers/hook-example",
 ]
 
 [workspace.package]

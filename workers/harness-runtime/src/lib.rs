@@ -13,5 +13,6 @@ pub mod tools;
 
 pub use loop_state::{run_loop, LoopConfig, LoopOutcome};
 pub use runtime::{
-    BatchOutcome, EventSink, FinalizedTool, HookOutcome, LoopRuntime, MemoryRuntime, ToolHandler,
+    BatchOutcome, CapturedEvents, EchoTool, EventSink, FinalizedTool, HookOutcome, LoopRuntime,
+    MemoryRuntime, ToolHandler,
 };

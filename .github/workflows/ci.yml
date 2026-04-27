@@ -26,3 +26,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
+      - name: Generate fixtures
+        run: cargo run --bin gen-fixtures --quiet
+      - name: Replay fixtures
+        run: bash scripts/replay.sh

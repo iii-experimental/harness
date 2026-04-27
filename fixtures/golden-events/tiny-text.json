@@ -1,0 +1,111 @@
+[
+  {
+    "type": "agent_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "hello",
+          "type": "text"
+        }
+      ],
+      "role": "user",
+      "timestamp": 0
+    },
+    "type": "message_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "hello",
+          "type": "text"
+        }
+      ],
+      "role": "user",
+      "timestamp": 0
+    },
+    "type": "message_end"
+  },
+  {
+    "type": "turn_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "hi",
+          "type": "text"
+        }
+      ],
+      "model": "faux-model",
+      "provider": "faux",
+      "role": "assistant",
+      "stop_reason": "end",
+      "timestamp": 0
+    },
+    "type": "message_start"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "hi",
+          "type": "text"
+        }
+      ],
+      "model": "faux-model",
+      "provider": "faux",
+      "role": "assistant",
+      "stop_reason": "end",
+      "timestamp": 0
+    },
+    "type": "message_end"
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "text": "hi",
+          "type": "text"
+        }
+      ],
+      "model": "faux-model",
+      "provider": "faux",
+      "role": "assistant",
+      "stop_reason": "end",
+      "timestamp": 0
+    },
+    "tool_results": [],
+    "type": "turn_end"
+  },
+  {
+    "messages": [
+      {
+        "content": [
+          {
+            "text": "hello",
+            "type": "text"
+          }
+        ],
+        "role": "user",
+        "timestamp": 0
+      },
+      {
+        "content": [
+          {
+            "text": "hi",
+            "type": "text"
+          }
+        ],
+        "model": "faux-model",
+        "provider": "faux",
+        "role": "assistant",
+        "stop_reason": "end",
+        "timestamp": 0
+      }
+    ],
+    "type": "agent_end"
+  }
+]

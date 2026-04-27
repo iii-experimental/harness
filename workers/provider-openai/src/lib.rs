@@ -125,29 +125,26 @@ pub async fn collect(mut stream: ReceiverStream<AssistantMessageEvent>) -> Assis
 mod tests {
     use super::*;
 
+    /// Combined env-mutating test. Cargo runs tests in parallel within a
+    /// crate; splitting these into two tests creates a race on the shared
+    /// `OPENAI_API_KEY` env var. Coverage is identical.
     #[test]
-    fn from_env_reads_openai_api_key() {
+    fn from_env_reads_or_errors_per_state() {
         let prev = std::env::var("OPENAI_API_KEY").ok();
+
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(OpenAIConfig::from_env("gpt-4o-mini").is_err());
+
         std::env::set_var("OPENAI_API_KEY", "sk-test-fixture");
         let cfg = OpenAIConfig::from_env("gpt-4o-mini").expect("env present");
         assert_eq!(cfg.api_key, "sk-test-fixture");
         assert_eq!(cfg.model, "gpt-4o-mini");
         assert_eq!(cfg.max_tokens, 4096);
         assert_eq!(cfg.api_url, DEFAULT_API_URL);
+
         match prev {
             Some(v) => std::env::set_var("OPENAI_API_KEY", v),
             None => std::env::remove_var("OPENAI_API_KEY"),
-        }
-    }
-
-    #[test]
-    fn from_env_errors_when_missing() {
-        let prev = std::env::var("OPENAI_API_KEY").ok();
-        std::env::remove_var("OPENAI_API_KEY");
-        let err = OpenAIConfig::from_env("gpt-4o-mini");
-        assert!(err.is_err());
-        if let Some(v) = prev {
-            std::env::set_var("OPENAI_API_KEY", v);
         }
     }
 

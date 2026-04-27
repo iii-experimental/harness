@@ -31,6 +31,13 @@ members = [
     "workers/provider-vercel-ai-gateway",
     "workers/provider-opencode-zen",
     "workers/provider-opencode-go",
+    "workers/provider-azure-openai",
+    "workers/provider-google-vertex",
+    "workers/oauth-anthropic",
+    "workers/oauth-openai-codex",
+    "workers/oauth-github-copilot",
+    "workers/oauth-google-gemini-cli",
+    "workers/oauth-google-antigravity",
     "workers/harness-cli",
 ]
 

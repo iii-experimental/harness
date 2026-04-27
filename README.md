@@ -4,7 +4,7 @@ Single-agent loop runtime on [iii-engine](https://iii.dev).
 
 10 loop functions, 11 stream-event variants, 3 hook topics, 2 message-pull points. Tools register as iii functions. Hooks are independent subscribers on `agent::before_tool_call`, `agent::after_tool_call`, and `agent::transform_context`. Sessions, compaction, redaction, and document extraction self-register on the bus.
 
-> Status: 0.5.0, 0.x experimental. API surface unstable until production-proven.
+> Status: 0.6.0, 0.x experimental. API surface unstable until production-proven.
 
 ## Why
 
@@ -50,7 +50,8 @@ That is the entire vocabulary. Implementation details (auth, models, providers, 
 - `harness-types`, `harness-runtime` — loop, types, run_loop, built-in tools
 - `harness-cli` — reference CLI binary
 - `harness-tui` — ratatui interactive TUI binary
-- `harness-iii-bridge` — `LoopRuntime` impl over iii-engine; registers the 10 `agent::*` functions and 4 HTTP triggers
+- `harness-runtime::register_with_iii` — registers the 12 `agent::*` functions, 7 `tool::*` functions, and 4 HTTP triggers; `tool::bash` runtime-discovers `sandbox::exec`
+- `harness-iii-bridge` — older bridge crate retained for downstream consumers; new wiring lives in `harness-runtime`
 - `provider-base` — shared HTTP/SSE/error infra; OpenAI Chat Completions generic client
 - `provider-anthropic`, `provider-openai`, `provider-openai-responses`, `provider-google`, `provider-google-vertex`, `provider-azure-openai`, `provider-bedrock`, `provider-openrouter`, `provider-groq`, `provider-cerebras`, `provider-xai`, `provider-deepseek`, `provider-mistral`, `provider-fireworks`, `provider-kimi-coding`, `provider-minimax`, `provider-zai`, `provider-huggingface`, `provider-vercel-ai-gateway`, `provider-opencode-zen`, `provider-opencode-go`, `provider-faux`
 - `oauth-anthropic`, `oauth-openai-codex`, `oauth-github-copilot`, `oauth-google-gemini-cli`, `oauth-google-antigravity` — PKCE + device-code flows for subscription auth
@@ -100,8 +101,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ./target/release/harness --provider openai --model gpt-4o "say hi"
 ./target/release/harness --provider groq --model llama-3.3-70b-versatile "say hi"
 
-# read-only mode (skip bash tool)
-./target/release/harness --no-bash "what are the workspace crates?"
+# add the iii-sandbox worker so bash runs in a microVM (auto-discovered, no flag)
+iii worker add sandbox
+./target/release/harness "run uname -a"
 ```
 
 Built-in tools the agent can call:
@@ -145,7 +147,7 @@ ratatui interactive UI:
 
 ## Status
 
-Apache-2.0. v0.5.0 released — see [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.5.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`.
+Apache-2.0. v0.6.0 — first release where loop, tools, and providers actually run as iii functions on the bus (Phase A iii-first). See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.6.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`.
 
 Sub-agent spawn (`agent::run_loop` invoked recursively for parent-child traces) remains aspirational — the loop functions and bridge are in place, but the recursive convention is not yet wired or fixture-tested.
 

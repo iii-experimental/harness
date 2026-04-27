@@ -579,9 +579,10 @@ fn build_final(state: &PartialState, model: &str) -> AssistantMessage {
 
 /// Register `provider::openai-responses::stream` on the iii bus.
 pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
-    provider_base::register_provider_stream::<OpenAIResponsesConfig, _, _>(
+    provider_base::register_provider_stream::<OpenAIResponsesConfig, _, _, _, _>(
         iii,
         PROVIDER_NAME,
+        |model: &str| OpenAIResponsesConfig::from_env(model),
         stream,
     );
     Ok(())

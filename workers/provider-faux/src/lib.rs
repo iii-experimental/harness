@@ -132,29 +132,51 @@ pub fn register_canned(key: impl Into<String>, response: CannedResponse) {
     shared_provider().register(key, response);
 }
 
-/// Register `provider::faux::stream` on the iii bus.
+/// Register `provider::faux::stream_assistant` on the iii bus.
 ///
-/// The handler accepts `{ key }` and returns
-/// `{ events: [<AssistantMessageEvent>...] }` from the shared
-/// [`FauxProvider`]. Faux deviates from the standard provider shape because
-/// it has no `(config, system_prompt, messages, tools)` surface — the reply
-/// is keyed by an opaque test fixture identifier.
+/// The handler accepts the standard `{ model, system_prompt, messages,
+/// tools }` payload but uses `model` as the canned-response lookup key on
+/// the shared [`FauxProvider`]. The drained event stream is collapsed into
+/// the final [`AssistantMessage`] so the runtime router can deserialise it
+/// the same way it does for any other provider.
 pub async fn register_with_iii(iii: &III) -> anyhow::Result<()> {
+    use harness_types::{AssistantMessage, ContentBlock, ErrorKind, StopReason, TextContent};
     iii.register_function((
-        RegisterFunctionMessage::with_id("provider::faux::stream".to_string())
-            .with_description("Replay a canned faux provider response keyed by `key`".to_string()),
+        RegisterFunctionMessage::with_id("provider::faux::stream_assistant".to_string())
+            .with_description(
+                "Replay a canned faux provider response keyed by the `model` field".to_string(),
+            ),
         move |payload: Value| async move {
             let key = payload
-                .get("key")
+                .get("model")
                 .and_then(Value::as_str)
-                .ok_or_else(|| IIIError::Handler("missing required field: key".into()))?
+                .ok_or_else(|| IIIError::Handler("missing required field: model".into()))?
                 .to_string();
             let events = shared_provider()
                 .stream(&key)
                 .await
                 .map_err(|e| IIIError::Handler(e.to_string()))?;
-            serde_json::to_value(serde_json::json!({ "events": events }))
-                .map_err(|e| IIIError::Handler(e.to_string()))
+            let final_msg = events
+                .into_iter()
+                .rev()
+                .find_map(|ev| match ev {
+                    AssistantMessageEvent::Done { message } => Some(message),
+                    AssistantMessageEvent::Error { error } => Some(error),
+                    _ => None,
+                })
+                .unwrap_or_else(|| AssistantMessage {
+                    content: vec![ContentBlock::Text(TextContent {
+                        text: "faux: no canned response".into(),
+                    })],
+                    stop_reason: StopReason::Error,
+                    error_message: Some("faux: no canned response".into()),
+                    error_kind: Some(ErrorKind::Transient),
+                    usage: None,
+                    model: key.clone(),
+                    provider: "faux".into(),
+                    timestamp: 0,
+                });
+            serde_json::to_value(final_msg).map_err(|e| IIIError::Handler(e.to_string()))
         },
     ));
     Ok(())

@@ -111,7 +111,12 @@ async fn stream_inner(
 
 /// Register `provider::bedrock::stream` on the iii bus.
 pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
-    provider_base::register_provider_stream::<BedrockConfig, _, _>(iii, PROVIDER_NAME, stream);
+    provider_base::register_provider_stream::<BedrockConfig, _, _, _, _>(
+        iii,
+        PROVIDER_NAME,
+        |model: &str| BedrockConfig::from_env(model),
+        stream,
+    );
     Ok(())
 }
 

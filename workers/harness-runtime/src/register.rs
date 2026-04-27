@@ -132,6 +132,9 @@ pub async fn register_with_iii(iii: &III) -> anyhow::Result<()> {
 struct IiiRuntime {
     iii: III,
     hook_timeout_ms: u64,
+    provider: String,
+    model: String,
+    system_prompt: String,
 }
 
 impl IiiRuntime {
@@ -139,6 +142,24 @@ impl IiiRuntime {
         Self {
             iii,
             hook_timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
+            provider: String::new(),
+            model: String::new(),
+            system_prompt: String::new(),
+        }
+    }
+
+    fn with_session(
+        iii: III,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        system_prompt: impl Into<String>,
+    ) -> Self {
+        Self {
+            iii,
+            hook_timeout_ms: DEFAULT_HOOK_TIMEOUT_MS,
+            provider: provider.into(),
+            model: model.into(),
+            system_prompt: system_prompt.into(),
         }
     }
 
@@ -204,6 +225,9 @@ impl LoopRuntime for IiiRuntime {
     ) -> AssistantMessage {
         let payload = json!({
             "session_id": session_id,
+            "provider": self.provider,
+            "model": self.model,
+            "system_prompt": self.system_prompt,
             "messages": messages,
             "tools": tools,
         });
@@ -417,11 +441,18 @@ fn register_run_loop(iii: &III) {
             let iii = iii_for_handler.clone();
             async move {
                 let session_id = required_str(&payload, "session_id")?;
+                let provider = required_str(&payload, "provider")?;
+                let model = required_str(&payload, "model")?;
+                let system_prompt = payload
+                    .get("system_prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 let messages =
                     decode_field::<Vec<AgentMessage>>(&payload, "messages")?.unwrap_or_default();
                 let tools = decode_field::<Vec<AgentTool>>(&payload, "tools")?.unwrap_or_default();
 
-                let runtime = IiiRuntime::new(iii.clone());
+                let runtime = IiiRuntime::with_session(iii.clone(), provider, model, system_prompt);
                 let sink = IiiSink::new(iii, session_id.clone());
                 let cfg = LoopConfig {
                     session_id,

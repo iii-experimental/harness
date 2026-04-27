@@ -52,9 +52,10 @@ pub async fn stream(
 
 /// Register `provider::vercel-ai-gateway::stream` on the iii bus.
 pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
-    provider_base::register_provider_stream::<VercelAiGatewayConfig, _, _>(
+    provider_base::register_provider_stream::<VercelAiGatewayConfig, _, _, _, _>(
         iii,
         PROVIDER_NAME,
+        |model: &str| VercelAiGatewayConfig::from_env(model),
         stream,
     );
     Ok(())

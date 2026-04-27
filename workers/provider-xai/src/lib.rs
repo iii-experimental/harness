@@ -52,7 +52,12 @@ pub async fn stream(
 
 /// Register `provider::xai::stream` on the iii bus.
 pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
-    provider_base::register_provider_stream::<XaiConfig, _, _>(iii, PROVIDER_NAME, stream);
+    provider_base::register_provider_stream::<XaiConfig, _, _, _, _>(
+        iii,
+        PROVIDER_NAME,
+        |model: &str| XaiConfig::from_env(model),
+        stream,
+    );
     Ok(())
 }
 

@@ -501,7 +501,12 @@ fn build_content(state: &PartialState) -> Vec<ContentBlock> {
 /// [`stream`], drains the resulting event stream, and returns
 /// `{ events: [<AssistantMessageEvent>...] }`.
 pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
-    provider_base::register_provider_stream::<AnthropicConfig, _, _>(iii, "anthropic", stream);
+    provider_base::register_provider_stream::<AnthropicConfig, _, _, _, _>(
+        iii,
+        "anthropic",
+        |model: &str| AnthropicConfig::from_env(model),
+        stream,
+    );
     Ok(())
 }
 

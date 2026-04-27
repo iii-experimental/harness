@@ -52,7 +52,12 @@ pub async fn stream(
 
 /// Register `provider::huggingface::stream` on the iii bus.
 pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
-    provider_base::register_provider_stream::<HuggingFaceConfig, _, _>(iii, PROVIDER_NAME, stream);
+    provider_base::register_provider_stream::<HuggingFaceConfig, _, _, _, _>(
+        iii,
+        PROVIDER_NAME,
+        |model: &str| HuggingFaceConfig::from_env(model),
+        stream,
+    );
     Ok(())
 }
 

@@ -545,7 +545,12 @@ fn build_content(state: &PartialState) -> Vec<ContentBlock> {
 
 /// Register `provider::google-vertex::stream` on the iii bus.
 pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
-    provider_base::register_provider_stream::<VertexConfig, _, _>(iii, PROVIDER_NAME, stream);
+    provider_base::register_provider_stream::<VertexConfig, _, _, _, _>(
+        iii,
+        PROVIDER_NAME,
+        |model: &str| VertexConfig::from_env(model),
+        stream,
+    );
     Ok(())
 }
 

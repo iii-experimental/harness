@@ -581,7 +581,12 @@ fn build_final(state: &PartialState, model: &str) -> AssistantMessage {
 
 /// Register `provider::azure-openai::stream` on the iii bus.
 pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<()> {
-    provider_base::register_provider_stream::<AzureOpenAIConfig, _, _>(iii, PROVIDER_NAME, stream);
+    provider_base::register_provider_stream::<AzureOpenAIConfig, _, _, _, _>(
+        iii,
+        PROVIDER_NAME,
+        |model: &str| AzureOpenAIConfig::from_env(model),
+        stream,
+    );
     Ok(())
 }
 

@@ -40,6 +40,9 @@ members = [
     "workers/oauth-google-antigravity",
     "workers/harness-iii-bridge",
     "workers/harness-tui",
+    "workers/context-compaction",
+    "workers/session-corpus",
+    "workers/document-extract",
     "workers/harness-cli",
 ]
 

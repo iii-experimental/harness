@@ -30,7 +30,9 @@ use ratatui::Terminal;
 
 use harness_tui::app::SlashOutcome;
 use harness_tui::fuzzy::FuzzyIndex;
+use harness_tui::keybindings::{KeyAction, KeybindingsManager};
 use harness_tui::theme::Theme;
+use harness_tui::watcher::{ConfigReloadEvent, ConfigWatcher};
 use harness_tui::{App, AppStatus, ChannelSink, RuntimeHandle};
 
 const DEFAULT_PROVIDER: &str = "anthropic";
@@ -810,8 +812,15 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
     let mut last_tick = Instant::now();
     let mut last_spinner = Instant::now();
 
+    // Spawn the hot-reload watcher. Failure is non-fatal — the TUI still
+    // works, just without live config reloading.
+    let watcher = spawn_config_watcher(app);
+
     loop {
         app.drain_events();
+        if let Some(w) = &watcher {
+            drain_config_reloads(app, w);
+        }
         terminal.draw(|f| harness_tui::render::draw(f, app))?;
 
         let timeout = tick_rate
@@ -849,6 +858,67 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
     Ok(())
 }
 
+/// Spawn the config-file watcher for the active session. Returns `None` when
+/// the user-config directory cannot be resolved (no `$HOME`, etc.). The
+/// theme path is `Some` only when the active theme is a user-supplied file
+/// — the baked-in `dark` / `light` palettes have no on-disk source.
+fn spawn_config_watcher(app: &App) -> Option<ConfigWatcher> {
+    let kb_path = KeybindingsManager::watch_path()?;
+    let theme_path = user_theme_path(&app.theme.name);
+    ConfigWatcher::spawn(kb_path, theme_path)
+}
+
+/// Path the active theme would live at when written to disk. Returns `None`
+/// for the baked-in defaults (`dark`, `light`) — those have no source file
+/// to watch.
+fn user_theme_path(name: &str) -> Option<PathBuf> {
+    if matches!(name, "dark" | "light") {
+        return None;
+    }
+    let home = directories::UserDirs::new()?;
+    Some(
+        home.home_dir()
+            .join(".harness")
+            .join("themes")
+            .join(format!("{name}.toml")),
+    )
+}
+
+/// Drain any pending reload events emitted by the watcher and apply them in
+/// place. A single user save can produce both a keybindings and a theme
+/// event; we coalesce the status-line message when both fire in the same
+/// poll.
+fn drain_config_reloads(app: &mut App, watcher: &ConfigWatcher) {
+    let mut got_keybindings = false;
+    let mut got_theme = false;
+    while let Some(ev) = watcher.try_recv() {
+        match ev {
+            ConfigReloadEvent::Keybindings => got_keybindings = true,
+            ConfigReloadEvent::Theme => got_theme = true,
+        }
+    }
+    if got_keybindings {
+        app.keybindings = Arc::new(KeybindingsManager::load());
+    }
+    if got_theme {
+        let name = app.theme.name.clone();
+        match Theme::load_named(&name) {
+            Ok(t) => app.theme = t,
+            Err(e) => {
+                app.push_notification(format!("[hot-reload] theme '{name}' reload failed: {e}"));
+                // Don't return — still emit the combined status line below.
+            }
+        }
+    }
+    if got_keybindings && got_theme {
+        app.push_notification("[hot-reload] reloaded keybindings + theme".to_string());
+    } else if got_keybindings {
+        app.push_notification("[hot-reload] reloaded keybindings".to_string());
+    } else if got_theme {
+        app.push_notification("[hot-reload] reloaded theme".to_string());
+    }
+}
+
 fn handle_key(
     key: KeyEvent,
     app: &mut App,
@@ -858,7 +928,6 @@ fn handle_key(
     max_turns: usize,
 ) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
     // Overlays consume input first.
@@ -877,63 +946,100 @@ fn handle_key(
         app.reset_esc_latch();
     }
 
-    match (key.code, ctrl, alt, shift) {
-        (KeyCode::Char('h'), true, _, _) => app.toggle_hotkeys_overlay(),
-        (KeyCode::Char('c'), true, _, _) => {
+    // Step 1: ask the keybinding manager whether this chord is bound to an
+    // action. Cloning the Arc keeps us from borrowing `app` immutably across
+    // the dispatch arms below.
+    let manager = app.keybindings.clone();
+    if let Some(action) = manager.resolve(&key) {
+        if dispatch_global_action(
+            action,
+            key,
+            app,
+            &runtime_arc,
+            &sink_arc,
+            loop_cfg,
+            max_turns,
+        ) {
+            return;
+        }
+    }
+
+    // Step 2: fall through to plain editor input + cursor navigation. These
+    // are *not* configurable via keybindings.json — they're the inherent
+    // behaviour of an editor buffer.
+    dispatch_editor_input(key, app, ctrl);
+}
+
+/// Run an action returned by the manager. Returns `true` when the action was
+/// recognised and handled (no further dispatch needed); `false` means the
+/// caller should fall through to the editor-input layer.
+fn dispatch_global_action(
+    action: KeyAction,
+    key: KeyEvent,
+    app: &mut App,
+    runtime_arc: &Arc<ProviderRuntime>,
+    sink_arc: &Arc<dyn EventSink>,
+    loop_cfg: &LoopConfig,
+    max_turns: usize,
+) -> bool {
+    match action {
+        KeyAction::OpenHotkeys => {
+            app.toggle_hotkeys_overlay();
+            true
+        }
+        KeyAction::AbortOrQuit => {
             if matches!(app.status, AppStatus::Running) {
                 app.runtime.abort(&app.session_id);
                 app.status = AppStatus::Aborted;
             } else {
                 app.should_quit = true;
             }
+            true
         }
-        (KeyCode::Char('l'), true, _, _) => app.clear_scrollback(),
-        (KeyCode::Char('o'), true, _, _) => app.toggle_tools_collapsed(),
-        (KeyCode::Char('t'), true, _, _) => app.toggle_expand_thinking(),
-        (KeyCode::Char('v'), true, _, _) => app.paste_from_clipboard(),
-        (KeyCode::Char('w'), true, _, _) => {
+        KeyAction::ClearScrollback => {
+            app.clear_scrollback();
+            true
+        }
+        KeyAction::ToggleTools => {
+            app.toggle_tools_collapsed();
+            true
+        }
+        KeyAction::ToggleThinking => {
+            app.toggle_expand_thinking();
+            true
+        }
+        KeyAction::Paste => {
+            app.paste_from_clipboard();
+            true
+        }
+        KeyAction::DeleteWordBack => {
             app.editor.delete_word_back();
             app.refresh_command_picker();
             app.refresh_file_picker();
+            true
         }
-        (KeyCode::BackTab, _, _, _) => app.cycle_thinking_level(),
-        (KeyCode::Tab, _, _, true) => app.cycle_thinking_level(),
-        (KeyCode::Tab, _, _, _) => {
+        KeyAction::CycleThinkingLevel => {
+            app.cycle_thinking_level();
+            true
+        }
+        KeyAction::PickerComplete => {
             if app.command_picker_visible {
                 app.complete_slash();
             } else if app.file_picker_visible {
                 app.complete_file();
             }
+            true
         }
-        (KeyCode::Char(c), false, _, _) => {
-            app.editor.insert_char(c);
-            app.refresh_command_picker();
-            app.refresh_file_picker();
+        KeyAction::ScrollUp => {
+            app.scroll_up(5);
+            true
         }
-        (KeyCode::Char(c), true, _, _) if c.is_ascii_alphabetic() => {
-            let _ = c;
+        KeyAction::ScrollDown => {
+            app.scroll_down(5);
+            true
         }
-        (KeyCode::Backspace, _, _, _) => {
-            app.editor.delete_back();
-            app.refresh_command_picker();
-            app.refresh_file_picker();
-        }
-        (KeyCode::Delete, _, _, _) => {
-            app.editor.delete_forward();
-            app.refresh_command_picker();
-            app.refresh_file_picker();
-        }
-        (KeyCode::Left, _, _, _) => {
-            app.editor.move_left();
-            app.refresh_file_picker();
-        }
-        (KeyCode::Right, _, _, _) => {
-            app.editor.move_right();
-            app.refresh_file_picker();
-        }
-        (KeyCode::Home, _, _, _) => app.editor.home(),
-        (KeyCode::End, _, _, _) => app.editor.end(),
-        (KeyCode::Up, _, _, _) => {
+        KeyAction::HistoryPrev => {
+            // Up arrow is overloaded: picker > multiline editor > history.
             if app.command_picker_visible || app.file_picker_visible {
                 app.picker_select_prev();
             } else if app.editor.is_multiline() && !app.editor.cursor_at_first_row() {
@@ -941,8 +1047,9 @@ fn handle_key(
             } else {
                 app.history_prev();
             }
+            true
         }
-        (KeyCode::Down, _, _, _) => {
+        KeyAction::HistoryNext => {
             if app.command_picker_visible || app.file_picker_visible {
                 app.picker_select_next();
             } else if app.editor.is_multiline() && !app.editor.cursor_at_last_row() {
@@ -950,119 +1057,207 @@ fn handle_key(
             } else {
                 app.history_next();
             }
+            true
         }
-        (KeyCode::PageUp, _, _, _) => app.scroll_up(5),
-        (KeyCode::PageDown, _, _, _) => app.scroll_down(5),
-        (KeyCode::Esc, _, _, _) => {
-            // Double-Esc opens tree overlay when state is already idle.
+        KeyAction::Escape => {
             if app.maybe_open_tree_on_double_esc() {
-                return;
+                return true;
             }
             app.handle_escape();
+            true
         }
-        (KeyCode::Enter, _, _, true) => {
-            // Shift+Enter inserts a newline regardless of picker state.
+        KeyAction::Newline => {
             app.editor.insert_newline();
             app.refresh_command_picker();
             app.refresh_file_picker();
+            true
         }
-        (KeyCode::Enter, _, true, false) => {
-            // Pickers absorbed elsewhere; Alt+Enter is follow-up.
-            let raw = app.editor.text();
-            if maybe_handle_inline_bash(
+        KeyAction::SubmitFollowup => {
+            handle_submit(
                 app,
-                &raw,
                 runtime_arc.clone(),
                 sink_arc.clone(),
                 loop_cfg,
                 max_turns,
                 /* followup */ true,
-            ) {
-                return;
-            }
-            if maybe_handle_slash(app, &raw) {
-                app.editor.clear();
-                return;
-            }
-            if let Some(text) = app.submit_followup() {
-                let attachments = app.drain_attachments_as_blocks();
-                spawn_run(
-                    runtime_arc,
-                    sink_arc,
-                    loop_cfg.clone(),
-                    text,
-                    attachments,
-                    max_turns,
-                );
-                app.status = AppStatus::Running;
-            }
+            );
+            true
         }
-        (KeyCode::Enter, _, false, false) => {
+        KeyAction::Submit => {
+            // Vanilla Enter has overloads (picker complete, inline bash,
+            // slash, submit). Defer to the dedicated helper.
             if app.command_picker_visible {
                 app.complete_slash();
                 app.command_picker_visible = false;
-                return;
+                return true;
             }
             if app.file_picker_visible {
                 app.complete_file();
-                return;
+                return true;
             }
-            let raw = app.editor.text();
-            if maybe_handle_inline_bash(
+            handle_submit(
                 app,
-                &raw,
                 runtime_arc.clone(),
                 sink_arc.clone(),
                 loop_cfg,
                 max_turns,
                 /* followup */ false,
-            ) {
-                return;
-            }
-            if maybe_handle_slash(app, &raw) {
-                app.editor.clear();
-                return;
-            }
-            if let Some(text) = app.submit_message() {
-                let attachments = app.drain_attachments_as_blocks();
-                spawn_run(
-                    runtime_arc,
-                    sink_arc,
-                    loop_cfg.clone(),
-                    text,
-                    attachments,
-                    max_turns,
-                );
-                app.status = AppStatus::Running;
-            }
+            );
+            true
         }
+        // Picker openers + tree-overlay actions don't fire from the global
+        // dispatcher: `/` and `@` insert into the editor (and the picker
+        // refreshes via `refresh_*_picker`); tree actions are handled in
+        // `handle_tree_key`. Returning `false` lets editor-input absorb them.
+        KeyAction::PickerOpenCommand
+        | KeyAction::PickerOpenFile
+        | KeyAction::OpenTree
+        | KeyAction::TreeClose
+        | KeyAction::TreeFilterCycle
+        | KeyAction::TreeBookmark
+        | KeyAction::TreeToggleTimestamps
+        | KeyAction::TreePivot => {
+            let _ = key;
+            false
+        }
+    }
+}
+
+/// Common Enter-handling: inline bash, slash, then real submit. Used by both
+/// `Submit` and `SubmitFollowup`.
+fn handle_submit(
+    app: &mut App,
+    runtime_arc: Arc<ProviderRuntime>,
+    sink_arc: Arc<dyn EventSink>,
+    loop_cfg: &LoopConfig,
+    max_turns: usize,
+    followup: bool,
+) {
+    let raw = app.editor.text();
+    if maybe_handle_inline_bash(
+        app,
+        &raw,
+        runtime_arc.clone(),
+        sink_arc.clone(),
+        loop_cfg,
+        max_turns,
+        followup,
+    ) {
+        return;
+    }
+    if maybe_handle_slash(app, &raw) {
+        app.editor.clear();
+        return;
+    }
+    let submitted = if followup {
+        app.submit_followup()
+    } else {
+        app.submit_message()
+    };
+    if let Some(text) = submitted {
+        let attachments = app.drain_attachments_as_blocks();
+        spawn_run(
+            runtime_arc,
+            sink_arc,
+            loop_cfg.clone(),
+            text,
+            attachments,
+            max_turns,
+        );
+        app.status = AppStatus::Running;
+    }
+}
+
+/// Plain editor-input layer. Runs only when the keybinding manager didn't
+/// claim the chord. Cursor navigation, character entry, and editing are not
+/// configurable via overrides — they're the buffer's inherent behaviour.
+fn dispatch_editor_input(key: KeyEvent, app: &mut App, ctrl: bool) {
+    match key.code {
+        KeyCode::Char(c) if !ctrl => {
+            app.editor.insert_char(c);
+            app.refresh_command_picker();
+            app.refresh_file_picker();
+        }
+        KeyCode::Backspace => {
+            app.editor.delete_back();
+            app.refresh_command_picker();
+            app.refresh_file_picker();
+        }
+        KeyCode::Delete => {
+            app.editor.delete_forward();
+            app.refresh_command_picker();
+            app.refresh_file_picker();
+        }
+        KeyCode::Left => {
+            app.editor.move_left();
+            app.refresh_file_picker();
+        }
+        KeyCode::Right => {
+            app.editor.move_right();
+            app.refresh_file_picker();
+        }
+        KeyCode::Home => app.editor.home(),
+        KeyCode::End => app.editor.end(),
+        // Up/Down/PageUp/PageDown/Esc/Enter/Tab and friends should already
+        // have been claimed by the manager via their default chords. Ignored
+        // here so a user who unbinds them gets a no-op rather than fall-through
+        // editor noise.
         _ => {}
     }
 }
 
 /// Tree overlay key handler. Owns search input, filter cycle, bookmark, and
-/// pivot-to-top.
-fn handle_tree_key(key: KeyEvent, app: &mut App, ctrl: bool, shift: bool) {
-    match (key.code, ctrl, shift) {
-        (KeyCode::Esc, _, _) => {
-            app.tree_visible = false;
+/// pivot-to-top. Like `handle_key`, action chords are looked up via the
+/// keybinding manager first; arrow keys + plain char entry fall through.
+fn handle_tree_key(key: KeyEvent, app: &mut App, ctrl: bool, _shift: bool) {
+    let manager = app.keybindings.clone();
+    if let Some(action) = manager.resolve(&key) {
+        match action {
+            KeyAction::TreeClose | KeyAction::Escape => {
+                app.tree_visible = false;
+                return;
+            }
+            KeyAction::TreeFilterCycle => {
+                app.cycle_tree_filter();
+                return;
+            }
+            KeyAction::TreeBookmark => {
+                app.toggle_tree_bookmark();
+                return;
+            }
+            KeyAction::TreeToggleTimestamps => {
+                app.toggle_tree_timestamps();
+                return;
+            }
+            KeyAction::TreePivot | KeyAction::Submit => {
+                // Pivot: visual highlight only; no real branching for 0.5.
+                // TODO: wire up real session branching when /fork is implemented.
+                app.tree_visible = false;
+                return;
+            }
+            KeyAction::HistoryPrev => {
+                app.tree_cursor_up();
+                return;
+            }
+            KeyAction::HistoryNext => {
+                app.tree_cursor_down();
+                return;
+            }
+            _ => {
+                // Other actions (paste, scroll, etc.) don't apply inside the
+                // tree overlay. Fall through so plain-input editing can fire
+                // (e.g. typing into the search box).
+            }
         }
-        (KeyCode::Char('o'), true, _) => app.cycle_tree_filter(),
-        (KeyCode::Char('L' | 'l'), false, true) => {
-            app.toggle_tree_bookmark();
-        }
-        (KeyCode::Char('T' | 't'), false, true) => {
-            app.toggle_tree_timestamps();
-        }
-        (KeyCode::Up, _, _) => app.tree_cursor_up(),
-        (KeyCode::Down, _, _) => app.tree_cursor_down(),
-        (KeyCode::Enter, _, _) => {
-            // Pivot: visual highlight only; no real branching for 0.1.
-            // TODO: wire up real session branching when /fork is implemented.
-            app.tree_visible = false;
-        }
-        (KeyCode::Backspace, _, _) => app.tree_search_pop(),
-        (KeyCode::Char(c), false, _) => app.tree_search_push(c),
+    }
+
+    // Search-input fallback: arrows for cursor movement, plain chars for
+    // search filter, Backspace to delete.
+    match key.code {
+        KeyCode::Up => app.tree_cursor_up(),
+        KeyCode::Down => app.tree_cursor_down(),
+        KeyCode::Backspace => app.tree_search_pop(),
+        KeyCode::Char(c) if !ctrl => app.tree_search_push(c),
         _ => {}
     }
 }

@@ -1,0 +1,11 @@
+[package]
+name = "harness-tui"
+description = "stub - ratatui interactive TUI pending"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,1 @@
+//! Stub. ratatui implementation pending.

@@ -39,6 +39,7 @@ members = [
     "workers/oauth-google-gemini-cli",
     "workers/oauth-google-antigravity",
     "workers/harness-iii-bridge",
+    "workers/harness-tui",
     "workers/harness-cli",
 ]
 

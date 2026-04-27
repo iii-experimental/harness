@@ -54,6 +54,7 @@ pub mod client;
 pub mod hooks;
 pub mod register;
 pub mod runtime;
+pub mod sandbox_tool;
 pub mod sink;
 
 #[cfg(test)]
@@ -62,4 +63,5 @@ pub mod testing;
 pub use client::{BridgeError, IiiClientLike, IiiSdkClient, NoOpClient};
 pub use register::{register_agent_functions, AgentFunctionRefs, StreamAssistantFn};
 pub use runtime::{state_keys, IiiBridgeRuntime};
+pub use sandbox_tool::SandboxedBashTool;
 pub use sink::IiiEventSink;

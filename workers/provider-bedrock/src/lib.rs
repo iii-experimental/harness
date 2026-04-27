@@ -1,1 +1,204 @@
-//! Stub. Implementation pending.
+//! Non-streaming MVP client for the AWS Bedrock Converse API.
+//!
+//! Status: stub. The full implementation drives `aws-sdk-bedrockruntime`'s
+//! `converse` method (single-shot, non-streaming) and synthesises the
+//! Start + TextDelta + Stop + Done event sequence so the harness loop sees a
+//! standard provider stream. The 1.x AWS SDK requires `rustc >= 1.91.1`,
+//! which is ahead of the workspace toolchain (1.90). Until the toolchain
+//! catches up, this crate compiles a stable config surface and any call to
+//! `stream` returns a single classified error event — no panics, no hangs.
+//!
+//! When the toolchain is bumped, drop `aws-config` + `aws-sdk-bedrockruntime`
+//! into `Cargo.toml`, replace [`stream_inner`] with a real `converse` call,
+//! and the public surface stays the same. Streaming via Converse-Stream lands
+//! after that — the AWS event-stream binary frames need bespoke parsing that
+//! is not in scope for the 0.1.x line.
+
+use std::sync::Arc;
+
+use harness_types::{
+    AgentMessage, AgentTool, AssistantMessage, AssistantMessageEvent, ContentBlock, ErrorKind,
+    StopReason, TextContent,
+};
+use provider_base::error_event;
+use tokio::sync::mpsc;
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+
+/// Provider name reported on every emitted `AssistantMessage`.
+pub const PROVIDER_NAME: &str = "bedrock";
+
+/// Default AWS region when neither the env nor the caller specifies one.
+pub const DEFAULT_REGION: &str = "us-east-1";
+
+/// Configuration for a single Bedrock Converse call.
+#[derive(Debug, Clone)]
+pub struct BedrockConfig {
+    /// Bedrock model id, e.g. `anthropic.claude-3-5-sonnet-20240620-v1:0`.
+    pub model_id: String,
+    /// AWS region. `None` defers to `AWS_REGION` / SDK default chain.
+    pub region: Option<String>,
+    /// Hard ceiling on response tokens passed via `inferenceConfig.maxTokens`.
+    pub max_tokens: u32,
+}
+
+impl BedrockConfig {
+    /// Build a config from the environment.
+    ///
+    /// Region resolution: `AWS_REGION` env var if set, else
+    /// [`DEFAULT_REGION`]. Credentials are picked up by the AWS SDK default
+    /// chain (env vars, `~/.aws/credentials`, IMDS, etc.) at call time, so
+    /// this function only fails when the env layer itself is unreachable —
+    /// which it is not on a normal Unix process. Returning a `Result` keeps
+    /// the surface aligned with the other provider crates.
+    pub fn from_env(model_id: impl Into<String>) -> Result<Self, std::env::VarError> {
+        let region = std::env::var("AWS_REGION")
+            .ok()
+            .or_else(|| Some(DEFAULT_REGION.into()));
+        Ok(Self {
+            model_id: model_id.into(),
+            region,
+            max_tokens: 4096,
+        })
+    }
+
+    pub fn with_max_tokens(mut self, max: u32) -> Self {
+        self.max_tokens = max;
+        self
+    }
+
+    pub fn with_region(mut self, region: impl Into<String>) -> Self {
+        self.region = Some(region.into());
+        self
+    }
+}
+
+/// Stream a response from Bedrock Converse. Returns an event stream that
+/// closes with `done` on success or `error` on failure. Never throws.
+///
+/// Current behaviour: emits a single classified `Error` event explaining
+/// that the AWS SDK dependency is pending. The signature is final; the
+/// internals will swap to a real `converse` call once the toolchain bump
+/// lands. See module docs.
+pub async fn stream(
+    cfg: Arc<BedrockConfig>,
+    system_prompt: String,
+    messages: Vec<AgentMessage>,
+    tools: Vec<AgentTool>,
+) -> ReceiverStream<AssistantMessageEvent> {
+    let (tx, rx) = mpsc::channel(8);
+    tokio::spawn(async move {
+        stream_inner(cfg, system_prompt, messages, tools, tx).await;
+    });
+    ReceiverStream::new(rx)
+}
+
+async fn stream_inner(
+    cfg: Arc<BedrockConfig>,
+    _system_prompt: String,
+    _messages: Vec<AgentMessage>,
+    _tools: Vec<AgentTool>,
+    tx: mpsc::Sender<AssistantMessageEvent>,
+) {
+    let _ = tx
+        .send(error_event(
+            "Bedrock support pending; install aws-sdk-bedrockruntime",
+            None,
+            cfg.model_id.clone(),
+            PROVIDER_NAME,
+        ))
+        .await;
+}
+
+/// Convenience: collect a stream into a final `AssistantMessage`.
+pub async fn collect(mut stream: ReceiverStream<AssistantMessageEvent>) -> AssistantMessage {
+    let mut last: Option<AssistantMessage> = None;
+    while let Some(ev) = stream.next().await {
+        match ev {
+            AssistantMessageEvent::Done { message } => return message,
+            AssistantMessageEvent::Error { error } => return error,
+            AssistantMessageEvent::Start { partial }
+            | AssistantMessageEvent::TextStart { partial }
+            | AssistantMessageEvent::TextDelta { partial, .. }
+            | AssistantMessageEvent::TextEnd { partial }
+            | AssistantMessageEvent::ToolcallStart { partial }
+            | AssistantMessageEvent::ToolcallDelta { partial, .. }
+            | AssistantMessageEvent::ToolcallEnd { partial }
+            | AssistantMessageEvent::ThinkingStart { partial }
+            | AssistantMessageEvent::ThinkingDelta { partial, .. }
+            | AssistantMessageEvent::ThinkingEnd { partial } => {
+                last = Some(partial);
+            }
+            _ => {}
+        }
+    }
+    last.unwrap_or_else(|| AssistantMessage {
+        content: vec![ContentBlock::Text(TextContent {
+            text: "stream closed without final".into(),
+        })],
+        stop_reason: StopReason::Error,
+        error_message: Some("stream closed without final".into()),
+        error_kind: Some(ErrorKind::Transient),
+        usage: None,
+        model: String::new(),
+        provider: PROVIDER_NAME.into(),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_env_uses_aws_region_when_set() {
+        let prev = std::env::var("AWS_REGION").ok();
+        std::env::set_var("AWS_REGION", "eu-west-2");
+        let cfg = BedrockConfig::from_env("anthropic.claude-3-5-sonnet-20240620-v1:0")
+            .expect("env layer reachable");
+        assert_eq!(cfg.region.as_deref(), Some("eu-west-2"));
+        assert_eq!(cfg.model_id, "anthropic.claude-3-5-sonnet-20240620-v1:0");
+        assert_eq!(cfg.max_tokens, 4096);
+        match prev {
+            Some(v) => std::env::set_var("AWS_REGION", v),
+            None => std::env::remove_var("AWS_REGION"),
+        }
+    }
+
+    #[test]
+    fn from_env_falls_back_to_default_region_when_unset() {
+        let prev = std::env::var("AWS_REGION").ok();
+        std::env::remove_var("AWS_REGION");
+        let cfg = BedrockConfig::from_env("anthropic.claude-3-haiku-20240307-v1:0").expect("ok");
+        assert_eq!(cfg.region.as_deref(), Some(DEFAULT_REGION));
+        if let Some(v) = prev {
+            std::env::set_var("AWS_REGION", v);
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_emits_classified_error_event() {
+        let cfg = Arc::new(
+            BedrockConfig::from_env("anthropic.claude-3-haiku-20240307-v1:0").expect("ok"),
+        );
+        let s = stream(cfg, String::new(), Vec::new(), Vec::new()).await;
+        let final_msg = collect(s).await;
+        assert!(matches!(final_msg.stop_reason, StopReason::Error));
+        assert_eq!(final_msg.provider, PROVIDER_NAME);
+        assert!(final_msg.error_message.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AWS_ACCESS_KEY_ID"]
+    async fn live_smoke() {
+        if std::env::var("AWS_ACCESS_KEY_ID").is_err() {
+            eprintln!("skipping: AWS_ACCESS_KEY_ID unset");
+            return;
+        }
+        let cfg = Arc::new(
+            BedrockConfig::from_env("anthropic.claude-3-haiku-20240307-v1:0")
+                .expect("env reachable"),
+        );
+        let s = stream(cfg, "be terse".into(), Vec::new(), Vec::new()).await;
+        let _ = collect(s).await;
+    }
+}

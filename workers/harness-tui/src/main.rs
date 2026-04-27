@@ -798,6 +798,27 @@ async fn async_main() -> Result<()> {
     result
 }
 
+/// Flush queued native image escapes to stdout. Each job is positioned with
+/// crossterm `MoveTo`, then the raw payload bytes are emitted, then the
+/// stream is flushed so the terminal commits the image right away.
+///
+/// Writes happen on a fresh `stdout()` handle — the same file descriptor the
+/// ratatui `CrosstermBackend` is using — so the escape bytes interleave
+/// after ratatui's own draw flush.
+fn write_image_escapes(escapes: &harness_tui::render::PostDrawEscapes) -> Result<()> {
+    use crossterm::cursor::MoveTo;
+    use crossterm::queue;
+    use crossterm::style::Print;
+    use std::io::Write;
+
+    let mut out = std::io::stdout().lock();
+    for job in &escapes.jobs {
+        queue!(out, MoveTo(job.col, job.row), Print(&job.payload))?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
 /// Foreground event loop: pump crossterm input, drain the event channel, redraw.
 async fn run_event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
@@ -821,7 +842,11 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
         if let Some(w) = &watcher {
             drain_config_reloads(app, w);
         }
-        terminal.draw(|f| harness_tui::render::draw(f, app))?;
+        let mut escapes = harness_tui::render::PostDrawEscapes::default();
+        terminal.draw(|f| harness_tui::render::draw(f, app, &mut escapes))?;
+        if !escapes.jobs.is_empty() {
+            write_image_escapes(&escapes)?;
+        }
 
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())

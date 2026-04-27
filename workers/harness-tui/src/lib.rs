@@ -29,6 +29,7 @@ pub use fuzzy::FuzzyIndex;
 pub use image::{detect_protocol, ImageProtocol};
 pub use input::EditorBuffer;
 pub use keybindings::{KeyAction, Keybinding, KeybindingsFile, KeybindingsManager};
+pub use render::{EscapeJob, PostDrawEscapes};
 pub use sink::ChannelSink;
 pub use slash::{parse_slash, ParsedSlash, SlashCommandRegistry, SlashEntry};
 pub use slots::{BuiltinStatus, BuiltinWidget, SlotRegistry, StatusPosition};

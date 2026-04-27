@@ -1,4 +1,11 @@
-//! ratatui drawing layer. Pure function of `&App` — no side effects, no I/O.
+//! ratatui drawing layer. Pure function of `&App` — no I/O of its own.
+//!
+//! Native image escape sequences (Kitty / iTerm2) cannot be expressed in a
+//! ratatui buffer because ratatui only knows about styled cells; the raw
+//! escape bytes have to land on the underlying terminal stream verbatim.
+//! The renderer captures those bytes into a [`PostDrawEscapes`] collector
+//! during the draw pass; the caller writes them after `Terminal::draw`
+//! returns so they overlay the placeholder cells ratatui already painted.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -7,15 +14,53 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, AppStatus, MessageRole, RenderedMessage};
+use crate::image::ImageProtocol;
 use crate::keybindings::Keybinding;
 use crate::markdown;
 use crate::theme;
 
 const MAX_INPUT_ROWS: u16 = 10;
 
+/// One escape-sequence write queued during draw.
+///
+/// The renderer fills these in while ratatui paints the placeholder rows;
+/// the caller flushes them after `Terminal::draw` returns so the escape
+/// bytes land on top of the cells ratatui just wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscapeJob {
+    /// Cell column (zero-indexed from the screen origin).
+    pub col: u16,
+    /// Cell row (zero-indexed from the screen origin).
+    pub row: u16,
+    /// Raw escape bytes to emit at `(col, row)`. Already includes the
+    /// terminator (`ESC \\` for Kitty, `BEL` for iTerm2).
+    pub payload: String,
+}
+
+/// Bundle of post-draw escape writes. Empty after a draw on terminals that
+/// don't speak any image protocol — caller can skip writing entirely in
+/// that case.
+#[derive(Debug, Default, Clone)]
+pub struct PostDrawEscapes {
+    pub jobs: Vec<EscapeJob>,
+}
+
+impl PostDrawEscapes {
+    fn push(&mut self, col: u16, row: u16, payload: String) {
+        if payload.is_empty() {
+            return;
+        }
+        self.jobs.push(EscapeJob { col, row, payload });
+    }
+}
+
 /// Top-level draw entry point. Header + scrollback + widget area + queue
 /// indicator + input + status bar layout. Overlays paint on top.
-pub fn draw(f: &mut Frame, app: &App) {
+///
+/// `escapes` collects any native image-protocol escape bytes that should be
+/// written *after* ratatui's own draw flushes — see [`PostDrawEscapes`] for
+/// the rationale. On terminals without Kitty/iTerm2 support this stays empty.
+pub fn draw(f: &mut Frame, app: &App, escapes: &mut PostDrawEscapes) {
     let area = f.area();
     let input_inner_rows = app.editor.line_count().clamp(1, MAX_INPUT_ROWS as usize) as u16;
     let input_height = input_inner_rows + 2; // 2 for borders
@@ -34,7 +79,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .split(area);
 
     draw_header(f, chunks[0], app);
-    draw_messages(f, chunks[1], app);
+    draw_messages(f, chunks[1], app, escapes);
     draw_widgets(f, chunks[2], app);
     draw_queue_indicator(f, chunks[3], app);
     draw_input(f, chunks[4], app);
@@ -46,7 +91,12 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_file_picker(f, chunks[1], chunks[4], app);
     }
 
-    // Fullscreen overlays sit above everything, including the pickers.
+    // Fullscreen overlays sit above everything, including the pickers. When a
+    // tree or hotkeys overlay is up the message area is hidden, so the image
+    // escapes queued for it would render under the overlay; drop them.
+    if app.tree_visible || app.hotkeys_visible {
+        escapes.jobs.clear();
+    }
     if app.tree_visible {
         draw_tree_overlay(f, area, app);
     } else if app.hotkeys_visible {
@@ -67,9 +117,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(p, area);
 }
 
-fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
+fn draw_messages(f: &mut Frame, area: Rect, app: &App, escapes: &mut PostDrawEscapes) {
     let md_theme = markdown::Theme::from_palette();
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(app.messages.len() * 2);
+    // Track every image we render so the post-draw step can compute screen
+    // coordinates from the line index. We collect (line_index, ImagePayload)
+    // here and resolve coordinates after the full line list is built.
+    let mut image_anchors: Vec<(usize, &crate::app::ImagePayload)> = Vec::new();
 
     for m in &app.messages {
         match m.role {
@@ -114,8 +168,51 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
                 )));
             }
         }
-        for line in render_image_placeholders(m) {
-            lines.push(line);
+        // Image placeholders are one line per image in the placeholder
+        // fallback. When native rendering is enabled we still emit them so
+        // ratatui reserves the row, and then queue an escape job to overlay
+        // the real image on top of that row in the post-draw pass.
+        let placeholder_lines = render_image_placeholders(m);
+        for (i, img) in m.images.iter().enumerate() {
+            image_anchors.push((lines.len(), img));
+            lines.push(
+                placeholder_lines
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| Line::from(Span::raw(""))),
+            );
+        }
+    }
+
+    // Inner content rect ratatui will paint into. The outer block draws a top
+    // and bottom border so the content rect is `area` shrunk by 1 row top and
+    // 1 row bottom; column padding is zero.
+    let content_x = area.x;
+    let content_y = area.y.saturating_add(1);
+    let content_h = area.height.saturating_sub(2);
+
+    if app.image_render_native && !matches!(app.image_protocol, ImageProtocol::None) {
+        for (line_idx, img) in image_anchors {
+            // Compute screen row for this anchor accounting for the current
+            // scroll offset. Anchors above the viewport or below it are
+            // skipped — they'll come into view on a future scroll redraw.
+            let scroll = app.scroll_offset as usize;
+            if line_idx < scroll {
+                continue;
+            }
+            let visible_row = (line_idx - scroll) as u16;
+            if visible_row >= content_h {
+                continue;
+            }
+            let row = content_y + visible_row;
+            push_image_escapes(
+                escapes,
+                app.image_protocol,
+                img,
+                row,
+                content_x,
+                content_h.saturating_sub(visible_row),
+            );
         }
     }
 
@@ -124,6 +221,50 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
         .scroll((app.scroll_offset, 0))
         .block(Block::default().borders(Borders::TOP | Borders::BOTTOM));
     f.render_widget(p, area);
+}
+
+/// Encode the image with the given protocol and queue the resulting escape
+/// strings as a [`PostDrawEscapes`] job at `(col, row)`. Kitty splits its
+/// payload into one escape per chunk; iTerm2 emits a single OSC 1337.
+///
+/// `max_rows` is the viewport ceiling: the image is clamped to fit.
+fn push_image_escapes(
+    escapes: &mut PostDrawEscapes,
+    protocol: ImageProtocol,
+    img: &crate::app::ImagePayload,
+    row: u16,
+    col: u16,
+    max_rows: u16,
+) {
+    if max_rows == 0 || img.bytes.is_empty() {
+        return;
+    }
+    // Reserve at most 20 rows or `max_rows`, whichever is smaller. Cell
+    // metrics aren't available here without an OS-specific syscall, so use
+    // standard 8x16 px cells as the canonical assumption.
+    let cell_rows =
+        crate::image::calculate_image_rows(img.width_px, img.height_px, 8, 16, max_rows.min(20));
+    if cell_rows == 0 {
+        return;
+    }
+    match protocol {
+        ImageProtocol::Kitty => {
+            // Kitty graphics writes the image at the cursor position; the
+            // chunks have to be written contiguously without intervening
+            // moves so the protocol sees them as one transmission.
+            let chunks = crate::image::encode_kitty(&img.bytes, cell_rows);
+            let mut combined = String::new();
+            for c in chunks {
+                combined.push_str(&c);
+            }
+            escapes.push(col, row, combined);
+        }
+        ImageProtocol::ITerm2 => {
+            let payload = crate::image::encode_iterm2(&img.bytes, cell_rows);
+            escapes.push(col, row, payload);
+        }
+        ImageProtocol::None => {}
+    }
 }
 
 fn render_tool_result_lines(m: &crate::app::RenderedMessage, app: &App) -> Vec<Line<'static>> {
@@ -449,6 +590,134 @@ fn draw_widgets(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// Build per-row prefix glyphs for a tree given each node's `(id, parent_id)`
+/// in *display order*. Returns one prefix string per input node, in the same
+/// order. Roots get the empty prefix.
+///
+/// Uses the standard four-glyph alphabet:
+/// - `├─ ` — a non-last child at this depth
+/// - `└─ ` — the last child at this depth
+/// - `│  ` — pass-through column for an ancestor that still has siblings
+/// - `   ` — pass-through column for an ancestor that was a last child
+///
+/// Children of a parent are taken in the order they appear in `entries`, and
+/// the same ordering drives "is-last" detection. That matches how the tree
+/// would render after a depth-first walk.
+pub fn build_tree_prefixes<Id>(entries: &[(Id, Option<Id>)]) -> Vec<String>
+where
+    Id: Eq + Clone + std::hash::Hash,
+{
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    // Group children by parent to compute depth + last-child status without
+    // building an explicit tree node graph — we only ever need the answers
+    // for nodes that appear in `entries`, in input order.
+    let mut child_count: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut child_seen: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut parent_index: Vec<Option<usize>> = vec![None; entries.len()];
+    let mut depth: Vec<usize> = vec![0; entries.len()];
+    let mut id_to_index: std::collections::HashMap<&Id, usize> =
+        std::collections::HashMap::with_capacity(entries.len());
+    for (i, (id, _)) in entries.iter().enumerate() {
+        id_to_index.insert(id, i);
+    }
+    for (i, (_, parent)) in entries.iter().enumerate() {
+        if let Some(p) = parent {
+            if let Some(&pi) = id_to_index.get(p) {
+                parent_index[i] = Some(pi);
+                *child_count.entry(pi).or_insert(0) += 1;
+                depth[i] = depth[pi] + 1;
+            }
+        }
+    }
+    // Per node, decide if it is the *last* child of its parent. That requires
+    // knowing the total child count up-front (computed above) and the
+    // running tally as we visit children in input order (computed below).
+    let mut is_last: Vec<bool> = vec![false; entries.len()];
+    for i in 0..entries.len() {
+        if let Some(pi) = parent_index[i] {
+            let total = *child_count.get(&pi).unwrap_or(&0);
+            let seen = child_seen.entry(pi).or_insert(0);
+            *seen += 1;
+            is_last[i] = *seen == total;
+        }
+    }
+    // For each node, walk back up the parent chain to fill ancestor columns.
+    let mut out: Vec<String> = Vec::with_capacity(entries.len());
+    for i in 0..entries.len() {
+        let d = depth[i];
+        if d == 0 {
+            out.push(String::new());
+            continue;
+        }
+        // Build columns top-down: ancestor at depth 1 is the deepest root
+        // child, etc. The column glyph is "│  " if that ancestor was *not*
+        // the last child of its own parent, "   " otherwise. Then the leaf
+        // column uses "├─ " or "└─ " based on the node's own is_last flag.
+        let mut chain: Vec<usize> = Vec::with_capacity(d);
+        let mut cur = parent_index[i];
+        while let Some(p) = cur {
+            chain.push(p);
+            cur = parent_index[p];
+        }
+        chain.reverse();
+        let mut s = String::with_capacity(d * 3);
+        // chain has all ancestors from root to immediate parent; the ancestor
+        // columns are computed from chain[1..] (skip root, which has no
+        // column to draw above it). For nodes at depth 1 there are zero
+        // ancestor columns to draw.
+        for ancestor in chain.iter().skip(1) {
+            if is_last[*ancestor] {
+                s.push_str("   ");
+            } else {
+                s.push_str("│  ");
+            }
+        }
+        if is_last[i] {
+            s.push_str("└─ ");
+        } else {
+            s.push_str("├─ ");
+        }
+        out.push(s);
+    }
+    out
+}
+
+/// Derive `(message_index, parent_index)` pairs from a flat scrollback. The
+/// rules mirror what a viewer expects at a glance:
+/// - `User` and `Notification` start a new turn at depth 0 (no parent).
+/// - `Assistant` and `Thinking` attach to the most recent `User` (depth 1).
+/// - `ToolResult` attaches to the most recent `Assistant` if there is one,
+///   otherwise to the most recent `User`.
+///
+/// Each returned tuple uses the message's vector index as its id; that's
+/// also what `App.visible_tree_indices` returns.
+pub fn derive_tree_edges(messages: &[RenderedMessage]) -> Vec<(usize, Option<usize>)> {
+    let mut last_user: Option<usize> = None;
+    let mut last_assistant: Option<usize> = None;
+    let mut out = Vec::with_capacity(messages.len());
+    for (i, m) in messages.iter().enumerate() {
+        let parent = match m.role {
+            MessageRole::User | MessageRole::Notification => {
+                last_user = Some(i);
+                last_assistant = None;
+                None
+            }
+            MessageRole::Assistant | MessageRole::Thinking => {
+                let p = last_user;
+                if matches!(m.role, MessageRole::Assistant) {
+                    last_assistant = Some(i);
+                }
+                p
+            }
+            MessageRole::ToolResult => last_assistant.or(last_user),
+        };
+        out.push((i, parent));
+    }
+    out
+}
+
 fn draw_tree_overlay(f: &mut Frame, area: Rect, app: &App) {
     let overlay = centered_rect(area, 90, 90);
     f.render_widget(Clear, overlay);
@@ -501,6 +770,13 @@ fn draw_tree_overlay(f: &mut Frame, area: Rect, app: &App) {
     )]);
     f.render_widget(Paragraph::new(modes_line), header_chunks[1]);
 
+    // Build branch glyph prefixes off the *full* message vector first so that
+    // depth and is-last-child are computed across the whole conversation
+    // tree. Filtering / search just hides rows; the tree shape underneath
+    // stays stable. Index into `prefixes` by the actual message index.
+    let edges = derive_tree_edges(&app.messages);
+    let prefixes = build_tree_prefixes(&edges);
+
     let visible = app.visible_tree_indices();
     let body_h = header_chunks[2].height as usize;
     let cursor = app.tree_cursor.min(visible.len().saturating_sub(1));
@@ -536,7 +812,8 @@ fn draw_tree_overlay(f: &mut Frame, area: Rect, app: &App) {
                 String::new()
             };
             let preview: String = m.text.chars().take(120).collect();
-            let row = format!("{mark}{bookmark} #{idx:>3} {role:<5} {ts_prefix}{preview}");
+            let glyph = prefixes.get(*idx).cloned().unwrap_or_default();
+            let row = format!("{mark}{bookmark} #{idx:>3} {role:<5} {glyph}{ts_prefix}{preview}");
             let style = if i == cursor {
                 Style::default()
                     .bg(Color::DarkGray)
@@ -657,7 +934,8 @@ mod tests {
             Arc::new(Noop),
         );
         app.drain_events();
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        let mut escapes = PostDrawEscapes::default();
+        terminal.draw(|f| draw(f, &app, &mut escapes)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let dump = buffer
             .content
@@ -684,7 +962,8 @@ mod tests {
         );
         app.editor.set("/he");
         app.refresh_command_picker();
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        let mut escapes = PostDrawEscapes::default();
+        terminal.draw(|f| draw(f, &app, &mut escapes)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let dump = buffer
             .content
@@ -793,7 +1072,8 @@ mod tests {
         app.apply_event(AgentEvent::AgentStart);
         app.queued_steering_count = 2;
         app.queued_followup_count = 1;
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        let mut escapes = PostDrawEscapes::default();
+        terminal.draw(|f| draw(f, &app, &mut escapes)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let dump = buffer
             .content
@@ -805,5 +1085,205 @@ mod tests {
             dump.contains("1 follow-up"),
             "missing follow-up marker in {dump}"
         );
+    }
+
+    // ── tree-prefix builder ──────────────────────────────────────────────
+
+    #[test]
+    fn build_prefixes_handles_empty_input() {
+        let prefixes = build_tree_prefixes::<&str>(&[]);
+        assert!(prefixes.is_empty());
+    }
+
+    #[test]
+    fn build_prefixes_root_has_empty_prefix() {
+        let edges = vec![("root", None)];
+        let prefixes = build_tree_prefixes(&edges);
+        assert_eq!(prefixes, vec![""]);
+    }
+
+    #[test]
+    fn build_prefixes_marks_last_child_with_corner() {
+        // root
+        // ├─ a
+        // └─ b
+        let edges = vec![("r", None), ("a", Some("r")), ("b", Some("r"))];
+        let prefixes = build_tree_prefixes(&edges);
+        assert_eq!(prefixes[0], "");
+        assert_eq!(prefixes[1], "├─ ");
+        assert_eq!(prefixes[2], "└─ ");
+    }
+
+    #[test]
+    fn build_prefixes_threads_pipe_through_non_last_ancestor() {
+        // r
+        // ├─ a
+        // │  └─ a1
+        // └─ b
+        // a1's prefix should start with "│  " because `a` is not the last
+        // child of `r`, then "└─ " for itself (last child of `a`).
+        let edges = vec![
+            ("r", None),
+            ("a", Some("r")),
+            ("a1", Some("a")),
+            ("b", Some("r")),
+        ];
+        let prefixes = build_tree_prefixes(&edges);
+        assert_eq!(prefixes[2], "│  └─ ");
+        assert_eq!(prefixes[3], "└─ ");
+    }
+
+    #[test]
+    fn build_prefixes_uses_blank_column_after_last_ancestor() {
+        // r
+        // └─ a
+        //    ├─ a1
+        //    └─ a2
+        let edges = vec![
+            ("r", None),
+            ("a", Some("r")),
+            ("a1", Some("a")),
+            ("a2", Some("a")),
+        ];
+        let prefixes = build_tree_prefixes(&edges);
+        assert_eq!(prefixes[1], "└─ ");
+        assert_eq!(prefixes[2], "   ├─ ");
+        assert_eq!(prefixes[3], "   └─ ");
+    }
+
+    #[test]
+    fn derive_tree_edges_groups_assistant_under_user() {
+        use crate::app::RenderedMessage;
+        let msgs = vec![
+            RenderedMessage {
+                role: MessageRole::User,
+                text: "u1".into(),
+                timestamp: 0,
+                thinking_token_count: None,
+                tool_call_id: None,
+                is_error: false,
+                images: Vec::new(),
+            },
+            RenderedMessage {
+                role: MessageRole::Assistant,
+                text: "a1".into(),
+                timestamp: 0,
+                thinking_token_count: None,
+                tool_call_id: None,
+                is_error: false,
+                images: Vec::new(),
+            },
+            RenderedMessage {
+                role: MessageRole::ToolResult,
+                text: "      [tool ok]".into(),
+                timestamp: 0,
+                thinking_token_count: None,
+                tool_call_id: None,
+                is_error: false,
+                images: Vec::new(),
+            },
+        ];
+        let edges = derive_tree_edges(&msgs);
+        assert_eq!(edges[0].1, None);
+        assert_eq!(edges[1].1, Some(0));
+        assert_eq!(edges[2].1, Some(1));
+    }
+
+    #[test]
+    fn derive_tree_edges_starts_new_root_on_each_user() {
+        use crate::app::RenderedMessage;
+        let mk = |role| RenderedMessage {
+            role,
+            text: String::new(),
+            timestamp: 0,
+            thinking_token_count: None,
+            tool_call_id: None,
+            is_error: false,
+            images: Vec::new(),
+        };
+        let msgs = vec![
+            mk(MessageRole::User),
+            mk(MessageRole::Assistant),
+            mk(MessageRole::User),
+            mk(MessageRole::Assistant),
+        ];
+        let edges = derive_tree_edges(&msgs);
+        assert_eq!(edges[0].1, None);
+        assert_eq!(edges[1].1, Some(0));
+        assert_eq!(edges[2].1, None);
+        assert_eq!(edges[3].1, Some(2));
+    }
+
+    // ── image-escape collector ───────────────────────────────────────────
+
+    #[test]
+    fn image_escape_collector_skips_when_protocol_none() {
+        use crate::app::ImagePayload;
+        let img = ImagePayload {
+            mime: "image/png".into(),
+            bytes: vec![1, 2, 3, 4],
+            width_px: 16,
+            height_px: 16,
+        };
+        let mut esc = PostDrawEscapes::default();
+        push_image_escapes(&mut esc, ImageProtocol::None, &img, 0, 0, 5);
+        assert!(esc.jobs.is_empty());
+    }
+
+    #[test]
+    fn image_escape_collector_emits_kitty_payload() {
+        use crate::app::ImagePayload;
+        let img = ImagePayload {
+            mime: "image/png".into(),
+            bytes: vec![1, 2, 3, 4],
+            width_px: 32,
+            height_px: 32,
+        };
+        let mut esc = PostDrawEscapes::default();
+        push_image_escapes(&mut esc, ImageProtocol::Kitty, &img, 4, 2, 8);
+        assert_eq!(esc.jobs.len(), 1);
+        let j = &esc.jobs[0];
+        assert_eq!(j.row, 4);
+        assert_eq!(j.col, 2);
+        assert!(j.payload.starts_with("\x1b_G"), "payload: {:?}", j.payload);
+        assert!(j.payload.ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn image_escape_collector_emits_iterm2_osc() {
+        use crate::app::ImagePayload;
+        let img = ImagePayload {
+            mime: "image/jpeg".into(),
+            bytes: vec![1, 2, 3, 4],
+            width_px: 32,
+            height_px: 32,
+        };
+        let mut esc = PostDrawEscapes::default();
+        push_image_escapes(&mut esc, ImageProtocol::ITerm2, &img, 1, 0, 6);
+        assert_eq!(esc.jobs.len(), 1);
+        let j = &esc.jobs[0];
+        assert!(j.payload.starts_with("\x1b]1337;"));
+        assert!(j.payload.ends_with('\x07'));
+    }
+
+    #[test]
+    fn image_escape_collector_skips_zero_size_or_empty_bytes() {
+        use crate::app::ImagePayload;
+        let mut esc = PostDrawEscapes::default();
+        let empty = ImagePayload {
+            mime: "image/png".into(),
+            bytes: Vec::new(),
+            width_px: 16,
+            height_px: 16,
+        };
+        push_image_escapes(&mut esc, ImageProtocol::Kitty, &empty, 0, 0, 4);
+        let zero_dim = ImagePayload {
+            mime: "image/png".into(),
+            bytes: vec![1, 2, 3],
+            width_px: 0,
+            height_px: 0,
+        };
+        push_image_escapes(&mut esc, ImageProtocol::Kitty, &zero_dim, 0, 0, 4);
+        assert!(esc.jobs.is_empty());
     }
 }

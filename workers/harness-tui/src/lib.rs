@@ -8,7 +8,9 @@
 
 pub mod app;
 pub mod bash;
+pub mod clipboard;
 pub mod fuzzy;
+pub mod image;
 pub mod input;
 pub mod markdown;
 pub mod render;
@@ -17,9 +19,11 @@ pub mod slash;
 pub mod theme;
 
 pub use app::{
-    App, AppStatus, MessageRole, RenderedMessage, RenderedToolCall, RuntimeHandle, ToolState,
+    App, AppStatus, ImagePayload, MessageRole, PendingAttachment, RenderedMessage,
+    RenderedToolCall, RuntimeHandle, ToolState,
 };
 pub use fuzzy::FuzzyIndex;
+pub use image::{detect_protocol, ImageProtocol};
 pub use input::EditorBuffer;
 pub use sink::ChannelSink;
 pub use slash::{parse_slash, ParsedSlash, SlashCommandRegistry, SlashEntry};

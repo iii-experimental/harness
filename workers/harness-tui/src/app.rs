@@ -6,10 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use harness_types::{AgentEvent, AgentMessage, ContentBlock, Usage};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use harness_types::{AgentEvent, AgentMessage, ContentBlock, ImageContent, ThinkingLevel, Usage};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::clipboard;
 use crate::fuzzy::FuzzyIndex;
+use crate::image::{self, ImageProtocol};
 use crate::input::EditorBuffer;
 use crate::slash::{parse_slash, SlashCommandRegistry};
 
@@ -44,6 +48,8 @@ pub struct RenderedMessage {
     pub tool_call_id: Option<String>,
     /// True for tool-result lines that came back as errors.
     pub is_error: bool,
+    /// Image payloads carried by this scrollback entry. Empty for plain text.
+    pub images: Vec<ImagePayload>,
 }
 
 impl RenderedMessage {
@@ -55,8 +61,47 @@ impl RenderedMessage {
             thinking_token_count: None,
             tool_call_id: None,
             is_error: false,
+            images: Vec::new(),
         }
     }
+}
+
+/// Image attached to a `RenderedMessage`.
+///
+/// Carries decoded bytes (sniffed for dimensions) so the renderer can reserve
+/// the right number of rows. The `bytes` field is the raw image (PNG/JPEG/
+/// GIF/WebP) — not RGBA — so it can be re-emitted directly to Kitty / iTerm2
+/// escapes.
+#[derive(Debug, Clone)]
+pub struct ImagePayload {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+impl ImagePayload {
+    /// Construct from an `ImageContent` block; decodes base64 and sniffs
+    /// dimensions. Returns `None` if base64 decode fails. When dimensions
+    /// can't be sniffed, returns `Some` with width/height set to 0.
+    pub fn from_content(c: &ImageContent) -> Option<Self> {
+        let bytes = B64.decode(c.data.as_bytes()).ok()?;
+        let (w, h) = image::get_image_dimensions(&bytes).map_or((0, 0), |(w, h, _)| (w, h));
+        Some(Self {
+            mime: c.mime.clone(),
+            bytes,
+            width_px: w,
+            height_px: h,
+        })
+    }
+}
+
+/// Image attachment staged for the next outgoing user message (Ctrl+V paste).
+#[derive(Debug, Clone)]
+pub struct PendingAttachment {
+    pub mime: String,
+    pub data_base64: String,
+    pub size_bytes: usize,
 }
 
 /// State of an in-flight tool call.
@@ -143,6 +188,17 @@ pub struct App {
     pub file_picker_visible: bool,
     pub file_picker_query: String,
     pub file_picker_index: usize,
+    /// Reasoning effort tier for the next run. Cycled with Shift+Tab.
+    pub thinking_level: ThinkingLevel,
+    /// Images pasted with Ctrl+V; drained when the next user message submits.
+    pub pending_attachments: Vec<PendingAttachment>,
+    /// Detected image protocol; `None` when the host terminal speaks neither
+    /// Kitty nor iTerm2.
+    pub image_protocol: ImageProtocol,
+    /// When `false` (default), incoming images render as `[image: ...]`
+    /// placeholder lines. When `true`, the renderer also pushes real escape
+    /// sequences to stdout. Off by default in 0.1 — see image.rs docs.
+    pub image_render_native: bool,
 }
 
 impl App {
@@ -188,7 +244,69 @@ impl App {
             file_picker_visible: false,
             file_picker_query: String::new(),
             file_picker_index: 0,
+            thinking_level: ThinkingLevel::default(),
+            pending_attachments: Vec::new(),
+            image_protocol: image::detect_protocol(),
+            image_render_native: false,
         }
+    }
+
+    /// Cycle the thinking level: Off -> Minimal -> Low -> Medium -> High ->
+    /// Xhigh -> Off. TODO: wire this into the provider config so the chosen
+    /// tier actually drives the next request; for 0.1 this only retints the
+    /// editor border + status chip.
+    pub fn cycle_thinking_level(&mut self) {
+        self.thinking_level = match self.thinking_level {
+            ThinkingLevel::Off => ThinkingLevel::Minimal,
+            ThinkingLevel::Minimal => ThinkingLevel::Low,
+            ThinkingLevel::Low => ThinkingLevel::Medium,
+            ThinkingLevel::Medium => ThinkingLevel::High,
+            ThinkingLevel::High => ThinkingLevel::Xhigh,
+            ThinkingLevel::Xhigh => ThinkingLevel::Off,
+        };
+    }
+
+    /// Try to read an image from the system clipboard and stage it as a
+    /// pending attachment. Falls back to inserting clipboard text at the
+    /// cursor when no image is available.
+    pub fn paste_from_clipboard(&mut self) {
+        if let Some((bytes, mime)) = clipboard::read_image() {
+            let size = bytes.len();
+            let kb = size as f32 / 1024.0;
+            self.pending_attachments.push(PendingAttachment {
+                mime: mime.to_string(),
+                data_base64: B64.encode(&bytes),
+                size_bytes: size,
+            });
+            self.push_notification(format!("[image attached: {mime}, {kb:.1} KB]"));
+            return;
+        }
+        if let Some(text) = clipboard::read_text() {
+            for c in text.chars() {
+                if c == '\n' {
+                    self.editor.insert_newline();
+                } else {
+                    self.editor.insert_char(c);
+                }
+            }
+            self.refresh_command_picker();
+            self.refresh_file_picker();
+        }
+    }
+
+    /// Drain any pending image attachments into a list of `ContentBlock::Image`
+    /// suitable for prepending to the next outgoing user message. Returns an
+    /// empty vector when there are no attachments queued.
+    pub fn drain_attachments_as_blocks(&mut self) -> Vec<ContentBlock> {
+        self.pending_attachments
+            .drain(..)
+            .map(|a| {
+                ContentBlock::Image(ImageContent {
+                    mime: a.mime,
+                    data: a.data_base64,
+                })
+            })
+            .collect()
     }
 
     /// Drain every event currently waiting in the channel. Called once per
@@ -294,6 +412,7 @@ impl App {
                     thinking_token_count: None,
                     tool_call_id: Some(tool_call_id),
                     is_error,
+                    images: Vec::new(),
                 });
             }
         }
@@ -318,12 +437,22 @@ impl App {
         match message {
             AgentMessage::User(u) => {
                 let text = collect_text(&u.content);
-                if !text.is_empty() {
-                    self.messages.push(RenderedMessage::plain(
-                        MessageRole::User,
-                        format!(">>> user: {text}"),
-                        u.timestamp,
-                    ));
+                let images = collect_images(&u.content);
+                if !text.is_empty() || !images.is_empty() {
+                    let display = if text.is_empty() {
+                        ">>> user: [attachment]".to_string()
+                    } else {
+                        format!(">>> user: {text}")
+                    };
+                    self.messages.push(RenderedMessage {
+                        role: MessageRole::User,
+                        text: display,
+                        timestamp: u.timestamp,
+                        thinking_token_count: None,
+                        tool_call_id: None,
+                        is_error: false,
+                        images,
+                    });
                 }
             }
             AgentMessage::Assistant(a) => {
@@ -338,17 +467,23 @@ impl App {
                                 thinking_token_count: Some(approx_tokens),
                                 tool_call_id: None,
                                 is_error: false,
+                                images: Vec::new(),
                             });
                         }
                     }
                 }
                 let text = collect_text(&a.content);
-                if !text.is_empty() {
-                    self.messages.push(RenderedMessage::plain(
-                        MessageRole::Assistant,
+                let images = collect_images(&a.content);
+                if !text.is_empty() || !images.is_empty() {
+                    self.messages.push(RenderedMessage {
+                        role: MessageRole::Assistant,
                         text,
-                        a.timestamp,
-                    ));
+                        timestamp: a.timestamp,
+                        thinking_token_count: None,
+                        tool_call_id: None,
+                        is_error: false,
+                        images,
+                    });
                 }
                 for c in &a.content {
                     if let ContentBlock::ToolCall {
@@ -392,23 +527,39 @@ impl App {
     /// Submit the editor buffer as a user message. If idle, returns the text
     /// for the binary to inject as the run's initial prompt; if running, the
     /// message is queued onto the runtime's steering channel.
+    ///
+    /// Pending image attachments are drained either way: when idle the caller
+    /// pulls them via [`Self::drain_attachments_as_blocks`] before spawning;
+    /// when steering they are inlined into the queued message.
     pub fn submit_message(&mut self) -> Option<String> {
         let text = self.editor.take_text();
-        if text.trim().is_empty() {
+        let has_attachments = !self.pending_attachments.is_empty();
+        if text.trim().is_empty() && !has_attachments {
             return None;
         }
-        self.history.push(text.clone());
-        self.history_cursor = None;
+        if !text.is_empty() {
+            self.history.push(text.clone());
+            self.history_cursor = None;
+        }
 
         match &self.status {
             AppStatus::Idle | AppStatus::Aborted | AppStatus::Errored(_) => Some(text),
             AppStatus::Running => {
-                self.runtime
-                    .enqueue_steering(&self.session_id, user_message(&text));
+                let blocks = self.drain_attachments_as_blocks();
+                let attach_n = blocks.len();
+                self.runtime.enqueue_steering(
+                    &self.session_id,
+                    user_message_with_attachments(&text, blocks),
+                );
                 self.queued_steering_count = self.queued_steering_count.saturating_add(1);
+                let suffix = if attach_n > 0 {
+                    format!(" (+{attach_n} attachment)")
+                } else {
+                    String::new()
+                };
                 self.messages.push(RenderedMessage::plain(
                     MessageRole::Notification,
-                    format!("[steering queued] {text}"),
+                    format!("[steering queued] {text}{suffix}"),
                     chrono::Utc::now().timestamp_millis(),
                 ));
                 None
@@ -442,21 +593,33 @@ impl App {
     /// Submit as follow-up — agent finishes the current run, then processes.
     pub fn submit_followup(&mut self) -> Option<String> {
         let text = self.editor.take_text();
-        if text.trim().is_empty() {
+        let has_attachments = !self.pending_attachments.is_empty();
+        if text.trim().is_empty() && !has_attachments {
             return None;
         }
-        self.history.push(text.clone());
-        self.history_cursor = None;
+        if !text.is_empty() {
+            self.history.push(text.clone());
+            self.history_cursor = None;
+        }
 
         match &self.status {
             AppStatus::Idle | AppStatus::Aborted | AppStatus::Errored(_) => Some(text),
             AppStatus::Running => {
-                self.runtime
-                    .enqueue_followup(&self.session_id, user_message(&text));
+                let blocks = self.drain_attachments_as_blocks();
+                let attach_n = blocks.len();
+                self.runtime.enqueue_followup(
+                    &self.session_id,
+                    user_message_with_attachments(&text, blocks),
+                );
                 self.queued_followup_count = self.queued_followup_count.saturating_add(1);
+                let suffix = if attach_n > 0 {
+                    format!(" (+{attach_n} attachment)")
+                } else {
+                    String::new()
+                };
                 self.messages.push(RenderedMessage::plain(
                     MessageRole::Notification,
-                    format!("[follow-up queued] {text}"),
+                    format!("[follow-up queued] {text}{suffix}"),
                     chrono::Utc::now().timestamp_millis(),
                 ));
                 None
@@ -465,7 +628,8 @@ impl App {
     }
 
     /// `Esc` semantics: close any open picker first; clear the editor next;
-    /// otherwise abort any running session.
+    /// drop any staged image attachments next; otherwise abort any running
+    /// session.
     pub fn handle_escape(&mut self) {
         if self.command_picker_visible {
             self.command_picker_visible = false;
@@ -477,6 +641,12 @@ impl App {
         }
         if !self.editor.is_empty() {
             self.editor.clear();
+            return;
+        }
+        if !self.pending_attachments.is_empty() {
+            let n = self.pending_attachments.len();
+            self.pending_attachments.clear();
+            self.push_notification(format!("[cleared {n} pending attachment(s)]"));
             return;
         }
         if matches!(self.status, AppStatus::Running) {
@@ -853,18 +1023,23 @@ impl App {
             AppStatus::Aborted => "aborted".to_string(),
             AppStatus::Errored(e) => format!("error: {e}"),
         };
+        let think = format!(
+            "think:{}",
+            crate::theme::thinking_level_label(self.thinking_level)
+        );
         format!(
-            "{} turns · ↑{} ↓{} · {} · {} · {}",
-            self.turn_count, self.usage.input, self.usage.output, cost, ctx, status
+            "{} turns · ↑{} ↓{} · {} · {} · {} · {}",
+            self.turn_count, self.usage.input, self.usage.output, cost, ctx, think, status
         )
     }
 }
 
 const HOTKEY_LINES: &[&str] = &[
     "[hotkeys] Enter: submit   Shift+Enter: newline   Alt+Enter: follow-up",
-    "[hotkeys] Esc: clear / abort   Ctrl+C: abort or quit",
+    "[hotkeys] Esc: clear / drop attachment / abort   Ctrl+C: abort or quit",
     "[hotkeys] Ctrl+L: clear scrollback   Ctrl+O: toggle tool collapse",
-    "[hotkeys] Ctrl+T: toggle thinking blocks",
+    "[hotkeys] Ctrl+T: toggle thinking blocks   Ctrl+V: paste image / text",
+    "[hotkeys] Shift+Tab: cycle thinking level (off / minimal / low / med / high / xhigh)",
     "[hotkeys] PgUp/PgDn: scroll   Up/Down: history (single-line) or row nav",
     "[hotkeys] / opens command picker, Tab completes; @ opens file picker",
     "[hotkeys] !cmd runs bash and submits result, !!cmd runs and prints only",
@@ -894,12 +1069,33 @@ fn collect_text(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
+fn collect_images(blocks: &[ContentBlock]) -> Vec<ImagePayload> {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Image(c) => ImagePayload::from_content(c),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Wrap a string into a `User` `AgentMessage` with the current timestamp.
 pub fn user_message(text: &str) -> AgentMessage {
-    AgentMessage::User(harness_types::UserMessage {
-        content: vec![ContentBlock::Text(harness_types::TextContent {
+    user_message_with_attachments(text, Vec::new())
+}
+
+/// Wrap a string + image attachments into a `User` `AgentMessage`. Image
+/// blocks come before the text block so providers that scan for the first
+/// content block treat the attachments as preceding context.
+pub fn user_message_with_attachments(text: &str, images: Vec<ContentBlock>) -> AgentMessage {
+    let mut content: Vec<ContentBlock> = images;
+    if !text.is_empty() {
+        content.push(ContentBlock::Text(harness_types::TextContent {
             text: text.to_string(),
-        })],
+        }));
+    }
+    AgentMessage::User(harness_types::UserMessage {
+        content,
         timestamp: chrono::Utc::now().timestamp_millis(),
     })
 }
@@ -1315,5 +1511,119 @@ mod tests {
             .expect("thinking message present");
         assert_eq!(thinking.text, "thinking text");
         assert!(thinking.thinking_token_count.is_some());
+    }
+
+    #[test]
+    fn shift_tab_cycles_through_levels() {
+        let (mut app, _) = make_app();
+        assert_eq!(app.thinking_level, ThinkingLevel::Off);
+        app.cycle_thinking_level();
+        assert_eq!(app.thinking_level, ThinkingLevel::Minimal);
+        app.cycle_thinking_level();
+        assert_eq!(app.thinking_level, ThinkingLevel::Low);
+        app.cycle_thinking_level();
+        assert_eq!(app.thinking_level, ThinkingLevel::Medium);
+        app.cycle_thinking_level();
+        assert_eq!(app.thinking_level, ThinkingLevel::High);
+        app.cycle_thinking_level();
+        assert_eq!(app.thinking_level, ThinkingLevel::Xhigh);
+        app.cycle_thinking_level();
+        assert_eq!(app.thinking_level, ThinkingLevel::Off);
+    }
+
+    #[test]
+    fn pending_attachment_drained_on_submit_returns_blocks() {
+        let (mut app, _) = make_app();
+        app.pending_attachments.push(PendingAttachment {
+            mime: "image/png".into(),
+            data_base64: "AAAA".into(),
+            size_bytes: 3,
+        });
+        let blocks = app.drain_attachments_as_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], ContentBlock::Image(_)));
+        assert!(app.pending_attachments.is_empty());
+    }
+
+    #[test]
+    fn submit_message_drains_attachments_into_steering_when_running() {
+        let (mut app, rt) = make_app();
+        app.apply_event(AgentEvent::AgentStart);
+        app.editor.set("steer with image");
+        app.pending_attachments.push(PendingAttachment {
+            mime: "image/png".into(),
+            data_base64: "AAAA".into(),
+            size_bytes: 3,
+        });
+        let _ = app.submit_message();
+        assert!(app.pending_attachments.is_empty());
+        let g = rt.steering.lock().unwrap();
+        assert_eq!(g.len(), 1);
+        if let AgentMessage::User(u) = &g[0].1 {
+            // image block + text block.
+            assert_eq!(u.content.len(), 2);
+            assert!(matches!(&u.content[0], ContentBlock::Image(_)));
+        } else {
+            panic!("expected user message");
+        }
+    }
+
+    #[test]
+    fn escape_clears_attachments_when_buffer_empty() {
+        let (mut app, _) = make_app();
+        app.pending_attachments.push(PendingAttachment {
+            mime: "image/png".into(),
+            data_base64: "ZZ==".into(),
+            size_bytes: 1,
+        });
+        assert!(app.editor.is_empty());
+        app.handle_escape();
+        assert!(app.pending_attachments.is_empty());
+    }
+
+    #[test]
+    fn aborted_status_changes_does_not_panic_with_thinking_level() {
+        let (mut app, _) = make_app();
+        app.thinking_level = ThinkingLevel::High;
+        app.status = AppStatus::Aborted;
+        // Smoke: status_line is the only public projection that touches both
+        // fields; ensure they coexist.
+        let s = app.status_line();
+        assert!(s.contains("aborted"));
+        assert!(s.contains("think:high"));
+    }
+
+    #[test]
+    fn user_message_with_attachments_orders_image_before_text() {
+        let img = ContentBlock::Image(harness_types::ImageContent {
+            mime: "image/png".into(),
+            data: "AAAA".into(),
+        });
+        let m = user_message_with_attachments("hello", vec![img]);
+        if let AgentMessage::User(u) = m {
+            assert_eq!(u.content.len(), 2);
+            assert!(matches!(u.content[0], ContentBlock::Image(_)));
+            assert!(matches!(u.content[1], ContentBlock::Text(_)));
+        } else {
+            panic!("expected user message");
+        }
+    }
+
+    #[test]
+    fn image_payload_decodes_png_dimensions() {
+        // 1x1 grey PNG body, base64-encoded.
+        let bytes = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x05, 0x08, 0x06, 0x00, 0x00,
+            0x00,
+        ];
+        let data = B64.encode(&bytes);
+        let p = ImagePayload::from_content(&harness_types::ImageContent {
+            mime: "image/png".into(),
+            data,
+        })
+        .expect("payload decoded");
+        assert_eq!(p.width_px, 7);
+        assert_eq!(p.height_px, 5);
     }
 }

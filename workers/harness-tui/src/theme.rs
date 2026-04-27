@@ -2,6 +2,7 @@
 //!
 //! Centralised here so the terminal palette is easy to tweak in one place.
 
+use harness_types::ThinkingLevel;
 use ratatui::style::{Color, Modifier, Style};
 
 pub const COLOR_USER: Color = Color::Cyan;
@@ -65,4 +66,57 @@ pub fn queue_style() -> Style {
     Style::default()
         .fg(Color::Magenta)
         .add_modifier(Modifier::BOLD)
+}
+
+/// Map a `ThinkingLevel` to the editor border colour. Off is dim; tiers warm
+/// up through cyan/blue/magenta and end at red for the highest tier.
+pub fn thinking_level_color(level: ThinkingLevel) -> Color {
+    match level {
+        ThinkingLevel::Off => Color::DarkGray,
+        ThinkingLevel::Minimal => Color::Gray,
+        ThinkingLevel::Low => Color::Cyan,
+        ThinkingLevel::Medium => Color::Blue,
+        ThinkingLevel::High => Color::Magenta,
+        ThinkingLevel::Xhigh => Color::Red,
+    }
+}
+
+/// Short label rendered in the status bar chip (`think:high` etc.).
+pub fn thinking_level_label(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::Xhigh => "xhigh",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn thinking_level_colors_are_distinct() {
+        let mut set: HashSet<String> = HashSet::new();
+        for lvl in [
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+        ] {
+            let c = thinking_level_color(lvl);
+            assert!(set.insert(format!("{c:?}")), "duplicate colour for {lvl:?}");
+        }
+    }
+
+    #[test]
+    fn thinking_level_labels_are_distinct() {
+        assert_eq!(thinking_level_label(ThinkingLevel::Off), "off");
+        assert_eq!(thinking_level_label(ThinkingLevel::Xhigh), "xhigh");
+    }
 }

@@ -46,6 +46,8 @@ chrono = { workspace = true }
 arboard = "3"
 walkdir = "2"
 pulldown-cmark = "0.13"
+png = "0.17"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

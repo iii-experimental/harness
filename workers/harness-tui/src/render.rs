@@ -1,12 +1,12 @@
 //! ratatui drawing layer. Pure function of `&App` — no side effects, no I/O.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, AppStatus, MessageRole};
+use crate::app::{App, AppStatus, MessageRole, RenderedMessage};
 use crate::markdown;
 use crate::theme;
 
@@ -103,6 +103,9 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
                 )));
             }
         }
+        for line in render_image_placeholders(m) {
+            lines.push(line);
+        }
     }
 
     let p = Paragraph::new(lines)
@@ -179,8 +182,59 @@ fn render_tool_result_lines(m: &crate::app::RenderedMessage, app: &App) -> Vec<L
     out
 }
 
+fn render_image_placeholders(m: &RenderedMessage) -> Vec<Line<'static>> {
+    if m.images.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(m.images.len());
+    for img in &m.images {
+        let bytes = img.bytes.len();
+        let (kb_or_b, unit) = if bytes >= 1024 {
+            (bytes as f32 / 1024.0, "KB")
+        } else {
+            (bytes as f32, "B")
+        };
+        let dims = if img.width_px == 0 || img.height_px == 0 {
+            String::new()
+        } else {
+            format!(" {}x{}", img.width_px, img.height_px)
+        };
+        let label = format!("[image: {}{} {:.1} {}]", img.mime, dims, kb_or_b, unit);
+        out.push(Line::from(Span::styled(
+            label,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+    out
+}
+
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title("input");
+    let attach_n = app.pending_attachments.len();
+    if attach_n > 0 {
+        // The 1-row queue indicator slot above us is already painted; we
+        // can't grow this Rect, so we layer a single attachment notice on
+        // the top border title.
+    }
+    let title = if attach_n == 0 {
+        "input".to_string()
+    } else {
+        format!("input  ·  {attach_n} image attached")
+    };
+    let border_color = match &app.status {
+        AppStatus::Errored(_) => Color::LightRed,
+        AppStatus::Aborted => Color::Red,
+        _ => theme::thinking_level_color(app.thinking_level),
+    };
+    let mut border_style = Style::default().fg(border_color);
+    if matches!(app.status, AppStatus::Running) {
+        border_style = border_style.add_modifier(Modifier::BOLD);
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
     let inner_height = area.height.saturating_sub(2) as usize;
     let total = app.editor.line_count();
     let scroll_top = if total > inner_height {
@@ -461,6 +515,7 @@ mod tests {
             thinking_token_count: None,
             tool_call_id: Some("c9".into()),
             is_error: false,
+            images: Vec::new(),
         });
 
         let lines = render_tool_result_lines(&app.messages[0], &app);
@@ -500,6 +555,7 @@ mod tests {
             thinking_token_count: None,
             tool_call_id: Some("c9".into()),
             is_error: false,
+            images: Vec::new(),
         });
 
         let lines = render_tool_result_lines(&app.messages[0], &app);

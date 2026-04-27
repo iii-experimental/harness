@@ -747,6 +747,7 @@ async fn async_main() -> Result<()> {
             sink_arc.clone(),
             loop_cfg.clone(),
             initial,
+            Vec::new(),
             args.max_turns,
         );
         app.status = AppStatus::Running;
@@ -849,11 +850,14 @@ fn handle_key(
         (KeyCode::Char('l'), true, _, _) => app.clear_scrollback(),
         (KeyCode::Char('o'), true, _, _) => app.toggle_tools_collapsed(),
         (KeyCode::Char('t'), true, _, _) => app.toggle_expand_thinking(),
+        (KeyCode::Char('v'), true, _, _) => app.paste_from_clipboard(),
         (KeyCode::Char('w'), true, _, _) => {
             app.editor.delete_word_back();
             app.refresh_command_picker();
             app.refresh_file_picker();
         }
+        (KeyCode::BackTab, _, _, _) => app.cycle_thinking_level(),
+        (KeyCode::Tab, _, _, true) => app.cycle_thinking_level(),
         (KeyCode::Tab, _, _, _) => {
             if app.command_picker_visible {
                 app.complete_slash();
@@ -935,7 +939,15 @@ fn handle_key(
                 return;
             }
             if let Some(text) = app.submit_followup() {
-                spawn_run(runtime_arc, sink_arc, loop_cfg.clone(), text, max_turns);
+                let attachments = app.drain_attachments_as_blocks();
+                spawn_run(
+                    runtime_arc,
+                    sink_arc,
+                    loop_cfg.clone(),
+                    text,
+                    attachments,
+                    max_turns,
+                );
                 app.status = AppStatus::Running;
             }
         }
@@ -966,7 +978,15 @@ fn handle_key(
                 return;
             }
             if let Some(text) = app.submit_message() {
-                spawn_run(runtime_arc, sink_arc, loop_cfg.clone(), text, max_turns);
+                let attachments = app.drain_attachments_as_blocks();
+                spawn_run(
+                    runtime_arc,
+                    sink_arc,
+                    loop_cfg.clone(),
+                    text,
+                    attachments,
+                    max_turns,
+                );
                 app.status = AppStatus::Running;
             }
         }
@@ -1063,7 +1083,14 @@ fn maybe_handle_inline_bash(
             .enqueue_steering(&app.session_id, harness_tui::app::user_message(&formatted));
         app.push_notification(format!("[bash steered] {}", parsed.command));
     } else if let Some(text) = app.submit_text_as_user(formatted) {
-        spawn_run(runtime_arc, sink_arc, loop_cfg.clone(), text, max_turns);
+        spawn_run(
+            runtime_arc,
+            sink_arc,
+            loop_cfg.clone(),
+            text,
+            Vec::new(),
+            max_turns,
+        );
         app.status = AppStatus::Running;
     }
     true
@@ -1071,17 +1098,23 @@ fn maybe_handle_inline_bash(
 
 /// Spawn the agent loop for one initial prompt on the tokio runtime. The
 /// background task owns its own `Arc` clones; the foreground keeps draining
-/// the event channel.
+/// the event channel. `attachments` are content blocks (typically images)
+/// prepended before the text block on the first user message.
 fn spawn_run(
     runtime: Arc<ProviderRuntime>,
     sink: Arc<dyn EventSink>,
     loop_cfg: LoopConfig,
     prompt: String,
+    attachments: Vec<ContentBlock>,
     _max_turns: usize,
 ) {
     tokio::spawn(async move {
+        let mut content: Vec<ContentBlock> = attachments;
+        if !prompt.is_empty() {
+            content.push(ContentBlock::Text(TextContent { text: prompt }));
+        }
         let initial = vec![AgentMessage::User(UserMessage {
-            content: vec![ContentBlock::Text(TextContent { text: prompt })],
+            content,
             timestamp: chrono::Utc::now().timestamp_millis(),
         })];
         let _ = run_loop(&*runtime, &*sink, &loop_cfg, initial).await;

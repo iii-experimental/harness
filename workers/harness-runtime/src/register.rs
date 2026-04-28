@@ -708,7 +708,11 @@ fn register_stream_assistant(iii: &III) {
                         function_id: target.clone(),
                         payload: routed_payload,
                         action: None,
-                        timeout_ms: None,
+                        // Provider streams routinely exceed iii-sdk's 30 s
+                        // default for extended-thinking models or large
+                        // contexts. 5 minutes covers all observed real-world
+                        // cases without unbounding a wedged provider.
+                        timeout_ms: Some(300_000),
                     })
                     .await
                 {
@@ -1086,7 +1090,10 @@ fn register_tool_run_subagent(iii: &III) {
                         function_id: "agent::run_loop".to_string(),
                         payload: child_payload,
                         action: None,
-                        timeout_ms: None,
+                        // Sub-agent loops are LLM-driven and inherit the
+                        // same timeout shape as the top-level run_loop;
+                        // see harness-cli/main.rs for the rationale.
+                        timeout_ms: Some(600_000),
                     })
                     .await;
 
@@ -1232,6 +1239,12 @@ struct BashTool {
     iii: III,
     cwd: PathBuf,
     sandbox_id: Mutex<Option<String>>,
+    /// Tracks whether we've already emitted the host-fallback warning for
+    /// this session. The first time `sandbox::exec` is missing we log a
+    /// loud `tracing::warn!` so the user knows commands are running on
+    /// the host shell — silent fallback is a credibility hazard for an
+    /// agent harness that markets composable sandboxing.
+    host_fallback_warned: std::sync::atomic::AtomicBool,
 }
 
 impl BashTool {
@@ -1240,6 +1253,7 @@ impl BashTool {
             iii,
             cwd,
             sandbox_id: Mutex::new(None),
+            host_fallback_warned: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1336,6 +1350,14 @@ impl ToolHandler for BashTool {
         if self.sandbox_available().await {
             self.run_via_sandbox(&command).await
         } else {
+            if !self
+                .host_fallback_warned
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                tracing::warn!(
+                    "sandbox::exec not registered on the bus — tool::bash is running on the host shell. Register an iii-sandbox worker to isolate commands."
+                );
+            }
             self.run_on_host(&command).await
         }
     }

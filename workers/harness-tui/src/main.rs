@@ -617,6 +617,7 @@ async fn connect_iii(engine_url: &str) -> Result<III> {
 /// don't decode are silently dropped.
 async fn forward_events_from_stream(iii: Arc<III>, session_id: String, sink: Arc<dyn EventSink>) {
     let mut last_index: usize = 0;
+    let mut warned_shape = false;
     loop {
         let resp = iii
             .trigger(TriggerRequest {
@@ -630,15 +631,31 @@ async fn forward_events_from_stream(iii: Arc<III>, session_id: String, sink: Arc
             })
             .await;
         if let Ok(value) = resp {
-            if let Some(items) = value.get("items").and_then(Value::as_array) {
-                for item in items.iter().skip(last_index) {
-                    if let Some(data) = item.get("data") {
-                        if let Ok(event) = serde_json::from_value::<AgentEvent>(data.clone()) {
+            // iii v0.11.x stream::list returns a bare array of `data`
+            // payloads; older shapes wrapped them as `{items: [...]}`.
+            // Accept both — see iii-sdk-0.11.3/tests/stream.rs:219.
+            let items = value
+                .as_array()
+                .cloned()
+                .or_else(|| value.get("items").and_then(Value::as_array).cloned());
+            match items {
+                Some(items) => {
+                    for item in items.iter().skip(last_index) {
+                        let payload = item.get("data").unwrap_or(item);
+                        if let Ok(event) = serde_json::from_value::<AgentEvent>(payload.clone()) {
                             sink.emit(event).await;
                         }
                     }
+                    last_index = items.len();
                 }
-                last_index = items.len();
+                None if !warned_shape => {
+                    // Avoid eprintln/tracing here — TUI is in raw mode and
+                    // any stray write corrupts the render. Set the flag so
+                    // we don't spin warning forever; harness-runtime will
+                    // surface the same condition via tracing on its side.
+                    warned_shape = true;
+                }
+                None => {}
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;

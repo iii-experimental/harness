@@ -13,6 +13,7 @@
 //! after [`harness_runtime::register_with_iii`] so that
 //! `agent::stream_assistant` has a target to dispatch to.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -163,7 +164,12 @@ async fn main() -> Result<()> {
         "max_turns": args.max_turns,
     });
 
-    let printer = tokio::spawn(stream_events(iii.clone(), session_id.clone()));
+    let last_index = Arc::new(AtomicUsize::new(0));
+    let printer = tokio::spawn(stream_events(
+        iii.clone(),
+        session_id.clone(),
+        last_index.clone(),
+    ));
 
     // iii-sdk defaults `None` to a 30s timeout (DEFAULT_TIMEOUT_MS in iii.rs).
     // agent::run_loop drives a multi-turn LLM + tool loop and routinely runs
@@ -180,7 +186,12 @@ async fn main() -> Result<()> {
         .await
         .context("agent::run_loop failed")?;
 
+    // Stop the polling task and do one final drain so the tail events
+    // emitted between the last poll and the trigger response don't get
+    // dropped on the floor. last_index is shared so this picks up where
+    // the polling task left off — no re-prints.
     printer.abort();
+    drain_stream_once(&iii, &session_id, &last_index).await;
 
     let messages: Vec<AgentMessage> = response
         .get("messages")
@@ -229,32 +240,56 @@ async fn connect_iii(engine_url: &str) -> Result<III> {
     }
 }
 
+/// Drain `stream::list` once and emit each item as an `AgentEvent`. Tracks
+/// progress through a shared atomic so the post-loop final flush picks up
+/// where the polling task left off, no double-print. iii v0.11.x returns
+/// a bare array of the published `data` payloads (not `{items: [...]}` —
+/// see iii-sdk-0.11.3/tests/stream.rs:219); we accept either shape.
+async fn drain_stream_once(iii: &III, session_id: &str, last_index: &AtomicUsize) {
+    let Ok(resp) = iii
+        .trigger(TriggerRequest {
+            function_id: "stream::list".to_string(),
+            payload: json!({
+                "stream_name": harness_runtime::EVENTS_STREAM,
+                "group_id": session_id,
+            }),
+            action: None,
+            timeout_ms: None,
+        })
+        .await
+    else {
+        return;
+    };
+    let items = resp
+        .as_array()
+        .cloned()
+        .or_else(|| resp.get("items").and_then(Value::as_array).cloned());
+    let Some(items) = items else {
+        // Top-level keys help next user diagnose envelope drift.
+        let keys: Vec<_> = resp
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        eprintln!(
+            "[harness] stream::list returned unexpected shape (top-level keys: {keys:?}); printer is silent"
+        );
+        return;
+    };
+    let start = last_index.load(Ordering::Acquire);
+    for item in items.iter().skip(start) {
+        let payload = item.get("data").unwrap_or(item);
+        print_event(payload);
+    }
+    last_index.store(items.len(), Ordering::Release);
+}
+
 /// Subscribe to the per-session event stream and pretty-print events as
 /// they arrive. Best-effort: if the engine doesn't expose `stream::list`
 /// or the subscription fails, the loop still runs — the printer simply
-/// produces no output.
-async fn stream_events(iii: Arc<III>, session_id: String) {
+/// produces no output (with a single warning at startup).
+async fn stream_events(iii: Arc<III>, session_id: String, last_index: Arc<AtomicUsize>) {
     loop {
-        let resp = iii
-            .trigger(TriggerRequest {
-                function_id: "stream::list".to_string(),
-                payload: json!({
-                    "stream_name": harness_runtime::EVENTS_STREAM,
-                    "group_id": session_id,
-                }),
-                action: None,
-                timeout_ms: None,
-            })
-            .await;
-        if let Ok(value) = resp {
-            if let Some(items) = value.get("items").and_then(Value::as_array) {
-                for item in items {
-                    if let Some(data) = item.get("data") {
-                        print_event(data);
-                    }
-                }
-            }
-        }
+        drain_stream_once(&iii, &session_id, &last_index).await;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }

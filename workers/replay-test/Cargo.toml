@@ -25,6 +25,7 @@ iii-sdk = { workspace = true }
 provider-faux = { path = "../provider-faux" }
 harness-types = { path = "../harness-types" }
 chrono = { workspace = true }
+serial_test = "3"
 
 [[bin]]
 name = "replay"

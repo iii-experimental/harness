@@ -63,8 +63,11 @@ require cargo "install rustup from https://rustup.rs"
 mkdir -p "$(dirname "$REPO_DIR")"
 if [ -d "$REPO_DIR/.git" ]; then
     log "updating $REPO_DIR"
+    # Reset to FETCH_HEAD rather than origin/$BRANCH so re-runs with a
+    # different HARNESS_BRANCH work on shallow clones (where the
+    # remote-tracking ref for the new branch may not yet exist locally).
     git -C "$REPO_DIR" fetch --depth 1 origin "$BRANCH"
-    git -C "$REPO_DIR" reset --hard "origin/$BRANCH"
+    git -C "$REPO_DIR" reset --hard FETCH_HEAD
 else
     log "cloning $REPO_URL @ $BRANCH into $REPO_DIR"
     git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"

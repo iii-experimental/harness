@@ -670,23 +670,29 @@ fn register_stream_assistant(iii: &III) {
                         {
                             // RoutingDecision: { model, reason, policy_id?, ab_test_id?,
                             // fallback?, confidence, provider? }. The `provider` field is
-                            // a harness-driven extension to llm-router (see
-                            // iii-hq/workers PR). When absent, fall back to
-                            // (a) splitting `model` on `/` for namespaced ids
-                            // (`anthropic/claude-...`) (b) keeping the caller's
-                            // provider unchanged.
-                            if let Some(m) = decision.get("model").and_then(Value::as_str) {
-                                let resolved_provider = decision
-                                    .get("provider")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string)
-                                    .or_else(|| {
-                                        m.split_once('/').map(|(p, _)| p.to_string())
-                                    });
-                                if let Some(p) = resolved_provider {
-                                    provider.clone_from(&p);
-                                    routed_payload["provider"] = Value::String(p);
-                                }
+                            // a harness-driven extension to llm-router (see iii-hq/workers#57).
+                            // Resolution rules:
+                            //  1. explicit `provider` on the decision wins, with or without
+                            //     a `model` (router may swap provider only — e.g. failover);
+                            //  2. otherwise, derive provider from a namespaced model id
+                            //     (`anthropic/claude-...`) when present;
+                            //  3. otherwise, keep the caller's provider.
+                            // Model is lifted independently when present.
+                            let model_field = decision.get("model").and_then(Value::as_str);
+                            let resolved_provider = decision
+                                .get("provider")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    model_field
+                                        .and_then(|m| m.split_once('/'))
+                                        .map(|(p, _)| p.to_string())
+                                });
+                            if let Some(p) = resolved_provider {
+                                provider.clone_from(&p);
+                                routed_payload["provider"] = Value::String(p);
+                            }
+                            if let Some(m) = model_field {
                                 let model_id = m
                                     .split_once('/')
                                     .map_or_else(|| m.to_string(), |(_, rest)| rest.to_string());

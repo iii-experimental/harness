@@ -22,6 +22,7 @@ use iii_sdk::{register_worker, InitOptions, RegisterFunctionMessage, TriggerRequ
 use serde_json::{json, Value};
 
 #[tokio::test]
+#[serial_test::serial]
 async fn faux_round_trip() -> anyhow::Result<()> {
     let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
         eprintln!(
@@ -112,6 +113,7 @@ async fn faux_round_trip() -> anyhow::Result<()> {
 ///
 /// Gated on `IIIX_TEST_ENGINE_URL` for the same reason as `faux_round_trip`.
 #[tokio::test]
+#[serial_test::serial]
 async fn llm_router_swaps_provider_and_model() -> anyhow::Result<()> {
     let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
         eprintln!(

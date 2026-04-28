@@ -26,9 +26,11 @@ provider-faux = { path = "../provider-faux" }
 harness-types = { path = "../harness-types" }
 policy-subscribers = { path = "../policy-subscribers" }
 hook-example = { path = "../hook-example" }
+oauth-anthropic = { path = "../oauth-anthropic" }
 chrono = { workspace = true }
 serial_test = "3"
 tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
 
 [[bin]]
 name = "replay"

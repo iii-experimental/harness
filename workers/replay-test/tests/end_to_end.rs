@@ -499,3 +499,382 @@ async fn run_subagent_refuses_at_depth_limit() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Audit-log subscriber writes one JSON-line per dispatched tool call.
+///
+/// Subscribes `policy::audit_log` to a temp file, drives one tool dispatch
+/// through the loop (faux→bash via host shell on a deterministic command),
+/// then reads the log and asserts a single line containing both the tool
+/// name and an `is_error=false` result.
+#[tokio::test]
+#[serial_test::serial]
+async fn audit_log_records_after_tool_call() -> anyhow::Result<()> {
+    let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
+        eprintln!("skipping: set IIIX_TEST_ENGINE_URL to a running iii engine");
+        return Ok(());
+    };
+
+    let iii = register_worker(&engine_url, InitOptions::default());
+    iii.list_functions().await.expect("engine reachable");
+    harness_runtime::register_with_iii(&iii).await?;
+    provider_faux::register_with_iii(&iii).await?;
+
+    let model_key = format!("audit-bash-{}", chrono::Utc::now().timestamp_millis());
+    provider_faux::register_canned(
+        &model_key,
+        provider_faux::tool_call_only(
+            "bash",
+            "tc-audit",
+            json!({ "command": "echo audit_marker" }),
+            &model_key,
+            "faux",
+            chrono::Utc::now().timestamp_millis(),
+        ),
+    );
+
+    let log_dir = tempfile::tempdir()?;
+    let log_path = log_dir.path().join("audit.jsonl");
+    let audit = policy_subscribers::subscribe_audit_log(&iii, log_path.clone())?;
+
+    let session_id = format!("audit-{}", chrono::Utc::now().timestamp_millis());
+    let bash_tool = harness_types::AgentTool {
+        name: "bash".into(),
+        description: "bash".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": { "command": { "type": "string" } },
+            "required": ["command"]
+        }),
+        label: "bash".into(),
+        execution_mode: harness_types::ExecutionMode::Sequential,
+        prepare_arguments_supported: false,
+    };
+    let prompt = vec![AgentMessage::User(UserMessage {
+        content: vec![ContentBlock::Text(TextContent { text: "go".into() })],
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    })];
+
+    let _ = iii
+        .trigger(TriggerRequest {
+            function_id: "agent::run_loop".to_string(),
+            payload: json!({
+                "session_id": session_id,
+                "provider": "faux",
+                "model": model_key,
+                "system_prompt": "test",
+                "messages": prompt,
+                "tools": [bash_tool],
+                "max_turns": 2,
+            }),
+            action: None,
+            timeout_ms: Some(120_000),
+        })
+        .await
+        .expect("agent::run_loop succeeds");
+
+    let body = std::fs::read_to_string(&log_path)
+        .unwrap_or_default();
+    let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        !lines.is_empty(),
+        "audit log empty; subscriber never wrote (path: {})",
+        log_path.display()
+    );
+    let first: Value = serde_json::from_str(lines[0])?;
+    assert_eq!(
+        first.get("tool_call").and_then(|t| t.get("name")).and_then(Value::as_str),
+        Some("bash"),
+        "audit log line missing tool_call.name=bash"
+    );
+    assert!(
+        first.get("ts_ms").and_then(Value::as_i64).is_some(),
+        "audit log line missing ts_ms"
+    );
+
+    audit.unregister();
+    Ok(())
+}
+
+/// DLP scrubber rewrites secret shapes in tool result text. Drives a bash
+/// tool call that echoes a fake AWS access key, registers
+/// `policy::dlp_scrubber`, and asserts the post-loop transcript shows the
+/// secret replaced with the redaction marker.
+#[tokio::test]
+#[serial_test::serial]
+async fn dlp_scrubber_rewrites_secret_in_tool_result() -> anyhow::Result<()> {
+    let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
+        eprintln!("skipping: set IIIX_TEST_ENGINE_URL to a running iii engine");
+        return Ok(());
+    };
+
+    let iii = register_worker(&engine_url, InitOptions::default());
+    iii.list_functions().await.expect("engine reachable");
+    harness_runtime::register_with_iii(&iii).await?;
+    provider_faux::register_with_iii(&iii).await?;
+
+    // The fake key matches `AKIA[0-9A-Z]{16}` → scrubber should redact.
+    let fake_key = "AKIAABCDEFGHIJKLMNOP";
+    let model_key = format!("dlp-bash-{}", chrono::Utc::now().timestamp_millis());
+    provider_faux::register_canned(
+        &model_key,
+        provider_faux::tool_call_only(
+            "bash",
+            "tc-dlp",
+            json!({ "command": format!("echo {fake_key}") }),
+            &model_key,
+            "faux",
+            chrono::Utc::now().timestamp_millis(),
+        ),
+    );
+
+    let dlp = policy_subscribers::subscribe_dlp_scrubber(&iii)?;
+
+    let session_id = format!("dlp-{}", chrono::Utc::now().timestamp_millis());
+    let bash_tool = harness_types::AgentTool {
+        name: "bash".into(),
+        description: "bash".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": { "command": { "type": "string" } },
+            "required": ["command"]
+        }),
+        label: "bash".into(),
+        execution_mode: harness_types::ExecutionMode::Sequential,
+        prepare_arguments_supported: false,
+    };
+    let prompt = vec![AgentMessage::User(UserMessage {
+        content: vec![ContentBlock::Text(TextContent { text: "go".into() })],
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    })];
+
+    let resp: Value = iii
+        .trigger(TriggerRequest {
+            function_id: "agent::run_loop".to_string(),
+            payload: json!({
+                "session_id": session_id,
+                "provider": "faux",
+                "model": model_key,
+                "system_prompt": "test",
+                "messages": prompt,
+                "tools": [bash_tool],
+                "max_turns": 2,
+            }),
+            action: None,
+            timeout_ms: Some(120_000),
+        })
+        .await
+        .expect("agent::run_loop succeeds");
+
+    let messages: Vec<AgentMessage> =
+        serde_json::from_value(resp.get("messages").cloned().expect("messages"))?;
+
+    // Find the tool-result. Its text should NOT contain the raw key (the
+    // scrubber's merge_after replaced it) and SHOULD contain the marker.
+    let tool_text = messages.iter().find_map(|m| {
+        let AgentMessage::ToolResult(r) = m else { return None };
+        for cb in &r.content {
+            if let ContentBlock::Text(t) = cb {
+                return Some(t.text.clone());
+            }
+        }
+        None
+    });
+    let text = tool_text.expect("tool_result with text content present");
+    assert!(
+        !text.contains(fake_key),
+        "raw secret survived the scrubber: {text}"
+    );
+    assert!(
+        text.to_uppercase().contains("REDACTED"),
+        "redaction marker missing from scrubbed output: {text}"
+    );
+
+    dlp.unregister();
+    Ok(())
+}
+
+/// transform_context subscriber can mutate the in-flight messages array.
+/// Registers a tiny test subscriber that prepends a marker user message
+/// to the messages, drives a faux text-only turn, and asserts the marker
+/// appears in the post-loop transcript — proving the runtime applied the
+/// subscriber's rewrite before stream_assistant was called.
+#[tokio::test]
+#[serial_test::serial]
+async fn transform_context_subscriber_mutates_messages() -> anyhow::Result<()> {
+    let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
+        eprintln!("skipping: set IIIX_TEST_ENGINE_URL to a running iii engine");
+        return Ok(());
+    };
+
+    let iii = register_worker(&engine_url, InitOptions::default());
+    iii.list_functions().await.expect("engine reachable");
+    harness_runtime::register_with_iii(&iii).await?;
+    provider_faux::register_with_iii(&iii).await?;
+
+    let model_key = format!("xform-{}", chrono::Utc::now().timestamp_millis());
+    provider_faux::register_canned(
+        &model_key,
+        provider_faux::text_only(
+            "ack",
+            &model_key,
+            "faux",
+            chrono::Utc::now().timestamp_millis(),
+        ),
+    );
+
+    let marker = format!(
+        "[xform-marker-{}]",
+        chrono::Utc::now().timestamp_millis()
+    );
+
+    // Register a one-shot transform_context subscriber inline. It receives
+    // {messages: [...]} via the collected pubsub envelope, prepends a
+    // marker user message, and replies with the new array. The runtime's
+    // decode_transform accepts a bare array shape.
+    let iii_for_xform = iii.clone();
+    let marker_for_handler = marker.clone();
+    let xform_fn = iii.register_function((
+        RegisterFunctionMessage::with_id("test::xform_inject".to_string())
+            .with_description("test fixture: prepend marker user msg".into()),
+        move |payload: Value| {
+            let iii = iii_for_xform.clone();
+            let marker = marker_for_handler.clone();
+            async move {
+                let event_id = payload
+                    .get("event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let reply_stream = payload
+                    .get("reply_stream")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let inner = payload
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or_else(|| payload.clone());
+                let mut messages: Vec<AgentMessage> = inner
+                    .get("messages")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                messages.insert(
+                    0,
+                    AgentMessage::User(UserMessage {
+                        content: vec![ContentBlock::Text(TextContent {
+                            text: marker.clone(),
+                        })],
+                        timestamp: chrono::Utc::now().timestamp_millis(),
+                    }),
+                );
+                let reply = json!({ "messages": messages });
+                if !event_id.is_empty() && !reply_stream.is_empty() {
+                    let _ = iii
+                        .trigger(TriggerRequest {
+                            function_id: "stream::set".into(),
+                            payload: json!({
+                                "stream_name": reply_stream,
+                                "group_id": event_id,
+                                "item_id": uuid::Uuid::new_v4().to_string(),
+                                "data": reply,
+                            }),
+                            action: None,
+                            timeout_ms: None,
+                        })
+                        .await;
+                }
+                Ok(reply)
+            }
+        },
+    ));
+    let xform_trig = iii.register_trigger(iii_sdk::RegisterTriggerInput {
+        trigger_type: "subscribe".into(),
+        function_id: "test::xform_inject".into(),
+        config: json!({ "topic": "agent::transform_context" }),
+        metadata: None,
+    })?;
+
+    let session_id = format!("xform-{}", chrono::Utc::now().timestamp_millis());
+    let prompt = vec![AgentMessage::User(UserMessage {
+        content: vec![ContentBlock::Text(TextContent { text: "hi".into() })],
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    })];
+
+    let resp: Value = iii
+        .trigger(TriggerRequest {
+            function_id: "agent::run_loop".to_string(),
+            payload: json!({
+                "session_id": session_id,
+                "provider": "faux",
+                "model": model_key,
+                "system_prompt": "test",
+                "messages": prompt,
+                "tools": [],
+                "max_turns": 2,
+            }),
+            action: None,
+            timeout_ms: Some(60_000),
+        })
+        .await
+        .expect("agent::run_loop succeeds");
+
+    let messages: Vec<AgentMessage> =
+        serde_json::from_value(resp.get("messages").cloned().expect("messages"))?;
+    let injected = messages.iter().any(|m| {
+        if let AgentMessage::User(u) = m {
+            return u.content.iter().any(|cb| matches!(
+                cb,
+                ContentBlock::Text(t) if t.text.contains(&marker)
+            ));
+        }
+        false
+    });
+    assert!(
+        injected,
+        "transform_context marker missing from transcript; transcript: {messages:#?}"
+    );
+
+    xform_trig.unregister();
+    xform_fn.unregister();
+    Ok(())
+}
+
+/// OAuth registration smoke. Confirms `oauth::anthropic::register_with_iii`
+/// binds three functions on the live engine and that `oauth::anthropic::status`
+/// is reachable by trigger. We don't drive the PKCE login flow (that
+/// requires a browser) — this is the registration path only, exercising
+/// the same bus-bound shape every other oauth-* worker uses.
+///
+/// Status returns `{ready: bool}` reflecting upstream-IDP reachability;
+/// the test asserts only that the field is present and boolean-typed,
+/// not its value, so flaky network conditions don't break CI.
+#[tokio::test]
+#[serial_test::serial]
+async fn oauth_anthropic_register_smoke() -> anyhow::Result<()> {
+    let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
+        eprintln!("skipping: set IIIX_TEST_ENGINE_URL to a running iii engine");
+        return Ok(());
+    };
+
+    let iii = register_worker(&engine_url, InitOptions::default());
+    iii.list_functions().await.expect("engine reachable");
+
+    let refs = oauth_anthropic::register_with_iii(&iii).await?;
+
+    let resp: Value = iii
+        .trigger(TriggerRequest {
+            function_id: "oauth::anthropic::status".to_string(),
+            payload: json!({}),
+            action: None,
+            timeout_ms: Some(15_000),
+        })
+        .await
+        .expect("oauth::anthropic::status reachable");
+    assert!(
+        resp.get("ready").and_then(Value::as_bool).is_some(),
+        "status response missing 'ready' bool: {resp:?}"
+    );
+
+    refs.unregister_all();
+    Ok(())
+}

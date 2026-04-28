@@ -55,6 +55,7 @@ iii-sdk = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+insta = "1"
 
 [[bin]]
 name = "harness-tui"

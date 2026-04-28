@@ -318,6 +318,13 @@ async fn drain_stream_once(iii: &III, session_id: &str, last_index: &AtomicUsize
 /// they arrive. Best-effort: if the engine doesn't expose `stream::list`
 /// or the subscription fails, the loop still runs — the printer simply
 /// produces no output (with a single warning at startup).
+///
+/// Forward note: iii-sdk 0.11.3 ships a `stream:join` / `Stream` trigger
+/// type (see `iii_sdk::builtin_triggers::IIITrigger::Stream`) that fires
+/// per new item without polling. Switching this consumer to a registered
+/// trigger would remove the 200 ms polling floor and pre-empt the final
+/// drain dance. Tracked separately so we can validate trigger semantics
+/// (backfill behaviour, ordering, replay) before flipping the default.
 async fn stream_events(iii: Arc<III>, session_id: String, last_index: Arc<AtomicUsize>) {
     loop {
         drain_stream_once(&iii, &session_id, &last_index).await;

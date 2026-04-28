@@ -745,18 +745,31 @@ fn register_stream_assistant(iii: &III) {
 /// most one bus probe per process lifetime.
 #[derive(Default)]
 struct RouterPresenceCache {
-    init: tokio::sync::Mutex<bool>,
+    /// `true` once `present` has been written by the slow path. Read
+    /// atomically on the fast path so concurrent callers don't queue
+    /// behind the mutex once the probe is done.
+    initialised: std::sync::atomic::AtomicBool,
+    /// Result of the one-shot bus probe; only valid once `initialised`
+    /// flips to true.
     present: std::sync::atomic::AtomicBool,
+    /// Serialises only the slow path (the bus probe). The fast path
+    /// never touches it.
+    init_lock: tokio::sync::Mutex<()>,
 }
 
 impl RouterPresenceCache {
     async fn has_router(&self, iii: &III) -> bool {
-        // Fast path: already initialised.
-        let mut guard = self.init.lock().await;
-        if *guard {
+        // Fast path: lock-free atomic read.
+        if self.initialised.load(std::sync::atomic::Ordering::Acquire) {
             return self.present.load(std::sync::atomic::Ordering::Acquire);
         }
-        // Slow path: probe once, record, release.
+        // Slow path: serialise the probe so concurrent first-callers
+        // don't all hit the bus. Re-check inside the lock for the
+        // double-checked pattern.
+        let _guard = self.init_lock.lock().await;
+        if self.initialised.load(std::sync::atomic::Ordering::Acquire) {
+            return self.present.load(std::sync::atomic::Ordering::Acquire);
+        }
         let present = iii
             .list_functions()
             .await
@@ -764,7 +777,8 @@ impl RouterPresenceCache {
             .unwrap_or(false);
         self.present
             .store(present, std::sync::atomic::Ordering::Release);
-        *guard = true;
+        self.initialised
+            .store(true, std::sync::atomic::Ordering::Release);
         present
     }
 }
@@ -782,6 +796,13 @@ impl RouterPresenceCache {
 /// Returns `None` when the messages array is empty or has no extractable
 /// user text — in that case the router is skipped and the loop dispatches
 /// directly to the configured provider.
+///
+/// Contract note for router operators: the `prompt` field reflects the
+/// *most recent user turn*, not the cumulative conversation. After a tool
+/// dispatch the loop calls `stream_assistant` again, which re-invokes the
+/// router with that same prompt — classifiers that key on intent see the
+/// original ask, not mid-conversation drift. If you need turn-aware
+/// routing, drive policy decisions off `tags` / `feature` instead.
 fn build_routing_request(payload: &Value) -> Option<Value> {
     let messages = payload.get("messages").and_then(Value::as_array)?;
     let prompt = messages.iter().rev().find_map(|m| {

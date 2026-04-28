@@ -220,8 +220,31 @@ async fn write_hook_reply(iii: &III, stream_name: &str, event_id: &str, reply: &
         .await;
 }
 
+/// Per-path mutex map. POSIX `O_APPEND` is atomic only up to `PIPE_BUF`
+/// (4096 bytes on most platforms). Tool results routinely exceed that, so
+/// concurrent `after_tool_call` subscribers writing the same audit log can
+/// interleave bytes. We serialise writes per path with a process-wide
+/// mutex map. Different paths still write concurrently.
+fn audit_log_locks() -> &'static std::sync::Mutex<
+    std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>,
+> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 async fn append_jsonl(path: &PathBuf, line: &Value) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
+
+    let lock = {
+        let mut map = audit_log_locks().lock().expect("audit_log_locks poisoned");
+        map.entry(path.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _guard = lock.lock().await;
+
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }

@@ -52,6 +52,7 @@ use iii_sdk::{
 };
 use serde_json::json;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::loop_state::{run_loop, LoopConfig};
 use crate::runtime::{EventSink, HookOutcome, LoopRuntime, ToolHandler};
@@ -214,7 +215,79 @@ impl IiiRuntime {
             .map(|infos| infos.into_iter().map(|f| f.function_id).collect())
             .unwrap_or_default()
     }
+
+    /// Publish a hook event to `topic` and collect subscriber replies.
+    ///
+    /// `iii-sdk` 0.11 has no `publish_collect` primitive yet (see
+    /// `docs/SDK-BLOCKED.md`). The harness-side workaround is:
+    ///
+    /// 1. Mint a fresh `event_id` (uuid v4).
+    /// 2. Publish the payload with `event_id` baked in. Subscribers route
+    ///    through `subscribe` triggers, do their work, then `stream::set`
+    ///    their reply on the per-event group `agent::hook_reply/<event_id>`.
+    /// 3. Wait `timeout_ms`, polling `stream::list` to gather everything
+    ///    that arrived before the deadline.
+    /// 4. Return the reply list. The contract for empty/unreachable bus is
+    ///    "no replies"; merge logic falls through to the default outcome.
+    ///
+    /// This is end-to-end best-effort. If the bus drops the publish, no
+    /// subscriber writes a reply; if a subscriber misbehaves, the timeout
+    /// drops it from the merge.
+    async fn publish_collect(&self, topic: &str, data: Value, timeout_ms: u64) -> Vec<Value> {
+        let event_id = Uuid::new_v4().to_string();
+        let stream_name = HOOK_REPLY_STREAM;
+        let _ = self
+            .invoke(
+                "publish",
+                json!({
+                    "topic": topic,
+                    "data": {
+                        "event_id": event_id,
+                        "reply_stream": stream_name,
+                        "payload": data,
+                    },
+                }),
+            )
+            .await;
+
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms.max(50));
+        let mut collected: Vec<Value> = Vec::new();
+        let mut last_index: usize = 0;
+        loop {
+            let resp = self
+                .invoke(
+                    "stream::list",
+                    json!({
+                        "stream_name": stream_name,
+                        "group_id": event_id,
+                    }),
+                )
+                .await;
+            if let Ok(value) = resp {
+                if let Some(items) = value.get("items").and_then(Value::as_array) {
+                    for item in items.iter().skip(last_index) {
+                        if let Some(d) = item.get("data") {
+                            collected.push(d.clone());
+                        }
+                    }
+                    last_index = items.len();
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        collected
+    }
 }
+
+/// Stream name where hook subscribers write their replies.
+///
+/// Group_id is the per-event uuid. Any custom hook subscriber MUST
+/// `stream::set` its reply value here with `group_id = event_id`.
+pub const HOOK_REPLY_STREAM: &str = "agent::hook_reply";
 
 #[async_trait]
 impl LoopRuntime for IiiRuntime {
@@ -253,33 +326,40 @@ impl LoopRuntime for IiiRuntime {
     }
 
     async fn before_tool_call(&self, tool_call: &ToolCall) -> HookOutcome {
-        let _ = self
-            .invoke(
-                "publish",
-                json!({ "topic": TOPIC_BEFORE, "data": { "tool_call": tool_call } }),
+        let replies = self
+            .publish_collect(
+                TOPIC_BEFORE,
+                json!({ "tool_call": tool_call }),
+                self.hook_timeout_ms,
             )
             .await;
-        let _ = self.hook_timeout_ms;
-        HookOutcome::default()
+        crate::hooks::merge_before(&replies)
     }
 
     async fn after_tool_call(&self, tool_call: &ToolCall, result: ToolResult) -> ToolResult {
-        let _ = self
-            .invoke(
-                "publish",
-                json!({ "topic": TOPIC_AFTER, "data": { "tool_call": tool_call, "result": result } }),
+        let replies = self
+            .publish_collect(
+                TOPIC_AFTER,
+                json!({ "tool_call": tool_call, "result": result }),
+                self.hook_timeout_ms,
             )
             .await;
-        result
+        crate::hooks::merge_after(result, &replies)
     }
 
     async fn transform_context(&self, messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
-        let _ = self
-            .invoke(
-                "publish",
-                json!({ "topic": TOPIC_TRANSFORM, "data": { "messages": messages } }),
+        let replies = self
+            .publish_collect(
+                TOPIC_TRANSFORM,
+                json!({ "messages": messages }),
+                self.hook_timeout_ms,
             )
             .await;
+        for r in replies.iter().rev() {
+            if let Some(decoded) = crate::hooks::decode_transform(r) {
+                return decoded;
+            }
+        }
         messages
     }
 

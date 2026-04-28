@@ -117,6 +117,7 @@ pub fn register_with_iii(
 
     let denied = config.denied_tools;
     let counters_for_before = counters.clone();
+    let iii_for_before = iii.clone();
     function_refs.push(iii.register_function((
         RegisterFunctionMessage::with_id(function_ids::BEFORE.into()).with_description(
             "before_tool_call subscriber: blocks tool calls whose name is on the denylist".into(),
@@ -124,8 +125,10 @@ pub fn register_with_iii(
         move |payload: Value| {
             let denied = denied.clone();
             let counters = counters_for_before.clone();
+            let iii = iii_for_before.clone();
             async move {
-                let tool_name = payload
+                let (event_id, reply_stream, inner) = unwrap_envelope(&payload);
+                let tool_name = inner
                     .get("tool_call")
                     .and_then(|tc| tc.get("name"))
                     .and_then(Value::as_str)
@@ -133,14 +136,18 @@ pub fn register_with_iii(
                     .to_string();
                 let mut state = counters.lock().await;
                 state.before_seen += 1;
-                if denied.contains(&tool_name) {
+                let reply = if denied.contains(&tool_name) {
                     state.before_blocked += 1;
-                    return Ok(json!({
+                    json!({
                         "block": true,
                         "reason": format!("denylist blocked: {tool_name}"),
-                    }));
-                }
-                Ok(json!({ "block": false }))
+                    })
+                } else {
+                    json!({ "block": false })
+                };
+                drop(state);
+                write_hook_reply(&iii, &reply_stream, &event_id, &reply).await;
+                Ok(reply)
             }
         },
     )));
@@ -152,20 +159,23 @@ pub fn register_with_iii(
     })?);
 
     let counters_for_after = counters.clone();
+    let iii_for_after = iii.clone();
     function_refs.push(iii.register_function((
         RegisterFunctionMessage::with_id(function_ids::AFTER.into()).with_description(
             "after_tool_call subscriber: logs the tool name and is_error flag for audit".into(),
         ),
         move |payload: Value| {
             let counters = counters_for_after.clone();
+            let iii = iii_for_after.clone();
             async move {
-                let tool_name = payload
+                let (event_id, reply_stream, inner) = unwrap_envelope(&payload);
+                let tool_name = inner
                     .get("tool_call")
                     .and_then(|tc| tc.get("name"))
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let is_error = payload
+                let is_error = inner
                     .get("result")
                     .and_then(|r| r.get("is_error"))
                     .and_then(Value::as_bool)
@@ -173,7 +183,10 @@ pub fn register_with_iii(
                 let mut state = counters.lock().await;
                 state.after_seen += 1;
                 tracing::info!(tool = %tool_name, is_error, "after_tool_call");
-                Ok(json!({ "ok": true }))
+                drop(state);
+                let reply = json!({ "ok": true });
+                write_hook_reply(&iii, &reply_stream, &event_id, &reply).await;
+                Ok(reply)
             }
         },
     )));
@@ -185,20 +198,23 @@ pub fn register_with_iii(
     })?);
 
     let counters_for_transform = counters.clone();
+    let iii_for_transform = iii.clone();
     function_refs.push(iii.register_function((
         RegisterFunctionMessage::with_id(function_ids::TRANSFORM.into()).with_description(
             "transform_context subscriber: pass-through that records observation count".into(),
         ),
         move |payload: Value| {
             let counters = counters_for_transform.clone();
+            let iii = iii_for_transform.clone();
             async move {
+                let (event_id, reply_stream, inner) = unwrap_envelope(&payload);
                 let mut state = counters.lock().await;
                 state.transform_seen += 1;
-                let messages = payload
-                    .get("messages")
-                    .cloned()
-                    .unwrap_or_else(|| json!([]));
-                Ok(json!({ "messages": messages }))
+                drop(state);
+                let messages = inner.get("messages").cloned().unwrap_or_else(|| json!([]));
+                let reply = json!({ "messages": messages });
+                write_hook_reply(&iii, &reply_stream, &event_id, &reply).await;
+                Ok(reply)
             }
         },
     )));
@@ -214,6 +230,50 @@ pub fn register_with_iii(
         triggers,
         counters,
     })
+}
+
+/// Decode the runtime's `publish_collect` envelope, returning
+/// `(event_id, reply_stream, inner_payload)`. Falls back to defaults that
+/// suppress the reply write when fields are missing — keeps the subscriber
+/// resilient to old-shape publishes.
+fn unwrap_envelope(payload: &Value) -> (String, String, Value) {
+    let event_id = payload
+        .get("event_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let reply_stream = payload
+        .get("reply_stream")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let inner = payload
+        .get("payload")
+        .cloned()
+        .unwrap_or_else(|| payload.clone());
+    (event_id, reply_stream, inner)
+}
+
+/// Write this subscriber's reply to the per-event reply stream so the
+/// publisher (the runtime) can collect it. No-op when the envelope was
+/// missing the event_id or reply_stream — preserves old behaviour for
+/// subscribers driven by direct `iii.trigger` calls in tests.
+async fn write_hook_reply(iii: &III, stream_name: &str, event_id: &str, reply: &Value) {
+    if event_id.is_empty() || stream_name.is_empty() {
+        return;
+    }
+    let _ = iii
+        .trigger(iii_sdk::TriggerRequest {
+            function_id: "stream::set".into(),
+            payload: json!({
+                "stream_name": stream_name,
+                "group_id": event_id,
+                "data": reply,
+            }),
+            action: None,
+            timeout_ms: None,
+        })
+        .await;
 }
 
 #[cfg(test)]

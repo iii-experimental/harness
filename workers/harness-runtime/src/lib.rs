@@ -7,6 +7,7 @@
 //! so the loop is testable in isolation against in-memory implementations.
 //! Production wiring binds `LoopRuntime` to iii-engine primitives.
 
+pub mod hooks;
 pub mod loop_state;
 pub mod register;
 pub mod runtime;
@@ -16,7 +17,8 @@ pub use tools::{BashPlaceholder, EditTool, FindTool, GrepTool, LsTool, ReadTool,
 
 pub use loop_state::{run_loop, LoopConfig, LoopOutcome};
 pub use register::{
-    register_with_iii, EVENTS_STREAM, STATE_SCOPE, TOPIC_AFTER, TOPIC_BEFORE, TOPIC_TRANSFORM,
+    register_with_iii, EVENTS_STREAM, HOOK_REPLY_STREAM, STATE_SCOPE, TOPIC_AFTER, TOPIC_BEFORE,
+    TOPIC_TRANSFORM,
 };
 pub use runtime::{
     BatchOutcome, CapturedEvents, EchoTool, EventSink, FinalizedTool, HookOutcome, LoopRuntime,

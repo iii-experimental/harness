@@ -6,14 +6,13 @@ Harness components that are degraded today because `iii-sdk` 0.11 lacks a primit
 
 **Need.** `publish_collect(topic, payload, timeout) -> Vec<Reply>` — fan-out to subscribers, gather every reply that arrives within the timeout window, return them as a list.
 
-**Today.** `iii.invoke("publish", ...)` is fire-and-forget. Subscriber replies are dropped. Hook fan-out cannot collect responses.
+**Today.** `iii.invoke("publish", ...)` is fire-and-forget. Subscriber replies are dropped.
 
-**Where harness routes around it.**
+**Workaround that ships in the harness (v0.10).** `IiiRuntime::publish_collect` (`workers/harness-runtime/src/register.rs`) mints a fresh `event_id`, publishes an envelope `{ event_id, reply_stream, payload }` to the topic, and polls `stream::list("agent::hook_reply", group_id=event_id)` for `timeout_ms`, collecting whatever replies subscribers wrote via `stream::set` on the same `(stream_name, group_id)` pair. `hook_example` (`workers/hook-example/src/lib.rs`) is the reference subscriber implementing the contract.
 
-- `workers/harness-runtime/src/register.rs:230-258` — `before_tool_call`, `after_tool_call`, `transform_context` publish fire-and-forget. Hooks receive the event but the loop ignores any reply.
-- `workers/harness-iii-bridge/src/hooks.rs` — pure merge logic ready for collected replies. Will be wired into the runtime when the SDK ships the primitive.
+**What we still want from the SDK.** A native `publish_collect` so subscribers don't have to learn the per-event-stream convention, and so the timeout window doesn't require polling. Until then the workaround is correct but heavier than the ideal.
 
-**Impact.** Hook subscribers can observe but cannot block tool calls, modify tool results, or rewrite context. The architecture document promises all three; today only the first works.
+**Impact today.** Hook subscribers can block tool calls, modify tool results, and rewrite context — `merge_before` / `merge_after` / `decode_transform` (`workers/harness-runtime/src/hooks.rs`) compose the collected replies. The architectural promise is met functionally; the SDK upgrade flips the implementation from polling to push.
 
 ## 2. Streaming subscription primitive
 
@@ -44,11 +43,9 @@ Harness components that are degraded today because `iii-sdk` 0.11 lacks a primit
 
 **Need.** `iii_sdk::test_helpers::spawn_in_process_engine() -> III` that boots an engine inside the test process and returns a connected client. Equivalent to what `register_worker` does but against an embedded engine instance.
 
-**Today.** Tests have to either spawn `iii engine` as a subprocess (CI flake risk) or skip end-to-end tests entirely. The integration test in `workers/replay-test` is `#[ignore]`-gated until this lands.
+**Today.** Tests can either spawn `iii engine` as a subprocess (CI flake risk) or skip end-to-end tests entirely.
 
-**Where harness routes around it.**
-
-- `workers/replay-test/tests/end_to_end.rs` (when present) — guarded by an env var so it runs only when `IIIX_TEST_ENGINE` points at a live engine.
+**Workaround that ships in the harness (v0.10).** `workers/replay-test/tests/end_to_end.rs` is gated on `IIIX_TEST_ENGINE_URL`. When unset (CI default, hermetic), the test prints a skip message and returns. When set to a reachable engine WebSocket URL (developer running `iii` locally), it registers `harness-runtime` + `provider-faux`, drives `agent::run_loop` against a canned response, and asserts the transcript is non-error with at least one assistant message.
 
 **Impact.** No hermetic e2e CI for the iii-bus path. Contract drift between runtime router and provider workers (the bug v0.6.0 review caught) is invisible to `cargo test --workspace`.
 

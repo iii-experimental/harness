@@ -20,6 +20,12 @@ anyhow = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 
+[dev-dependencies]
+iii-sdk = { workspace = true }
+provider-faux = { path = "../provider-faux" }
+harness-types = { path = "../harness-types" }
+chrono = { workspace = true }
+
 [[bin]]
 name = "replay"
 path = "src/main.rs"

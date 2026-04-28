@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers,
@@ -18,15 +17,14 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use harness_runtime::{
-    run_loop, EventSink, HookOutcome, LoopConfig, LoopRuntime, MemoryRuntime, ToolHandler,
-};
+use harness_runtime::{EventSink, EVENTS_STREAM};
 use harness_types::{
-    AgentMessage, AgentTool, AssistantMessage, ContentBlock, ExecutionMode, TextContent, ToolCall,
-    ToolResult, UserMessage,
+    AgentEvent, AgentMessage, AgentTool, ContentBlock, ExecutionMode, TextContent, UserMessage,
 };
+use iii_sdk::{register_worker, InitOptions, TriggerRequest, III};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use serde_json::{json, Value};
 
 use harness_tui::app::SlashOutcome;
 use harness_tui::fuzzy::FuzzyIndex;
@@ -38,220 +36,40 @@ use harness_tui::{App, AppStatus, ChannelSink, RuntimeHandle};
 const DEFAULT_PROVIDER: &str = "anthropic";
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a coding assistant running on the iii harness. Use the tools provided to inspect and modify files. Keep responses focused and concrete.";
 
-/// Tagged config for the selected provider. Same shape as harness-cli.
-enum ProviderConfig {
-    Anthropic(Arc<provider_anthropic::AnthropicConfig>),
-    OpenAI(Arc<provider_openai::OpenAIConfig>),
-    OpenAIResponses(Arc<provider_openai_responses::OpenAIResponsesConfig>),
-    Google(Arc<provider_google::GoogleConfig>),
-    Bedrock(Arc<provider_bedrock::BedrockConfig>),
-    OpenRouter(Arc<provider_openrouter::OpenRouterConfig>),
-    Groq(Arc<provider_groq::GroqConfig>),
-    Cerebras(Arc<provider_cerebras::CerebrasConfig>),
-    Xai(Arc<provider_xai::XaiConfig>),
-    DeepSeek(Arc<provider_deepseek::DeepSeekConfig>),
-    Mistral(Arc<provider_mistral::MistralConfig>),
-    Fireworks(Arc<provider_fireworks::FireworksConfig>),
-    KimiCoding(Arc<provider_kimi_coding::KimiCodingConfig>),
-    MiniMax(Arc<provider_minimax::MiniMaxConfig>),
-    Zai(Arc<provider_zai::ZaiConfig>),
-    HuggingFace(Arc<provider_huggingface::HuggingFaceConfig>),
-    VercelAiGateway(Arc<provider_vercel_ai_gateway::VercelAiGatewayConfig>),
-    OpencodeZen(Arc<provider_opencode_zen::OpencodeZenConfig>),
-    OpencodeGo(Arc<provider_opencode_go::OpencodeGoConfig>),
-    AzureOpenAI(Arc<provider_azure_openai::AzureOpenAIConfig>),
-    GoogleVertex(Arc<provider_google_vertex::VertexConfig>),
-}
-
-struct ProviderRuntime {
-    cfg: ProviderConfig,
-    inner: MemoryRuntime,
+/// Per-session driver that holds the iii client + the per-run params the
+/// loop needs. Replaces the old in-process `ProviderRuntime`. Cheap to clone.
+struct IiiAgentDriver {
+    iii: Arc<III>,
+    provider: String,
+    model: String,
     system_prompt: String,
+    max_turns: usize,
+    tools: Vec<AgentTool>,
 }
 
-#[async_trait]
-impl LoopRuntime for ProviderRuntime {
-    async fn stream_assistant(
-        &self,
-        _session_id: &str,
-        messages: &[AgentMessage],
-        tools: &[AgentTool],
-    ) -> AssistantMessage {
-        let sys = self.system_prompt.clone();
-        let msgs = messages.to_vec();
-        let tls = tools.to_vec();
-        match &self.cfg {
-            ProviderConfig::Anthropic(c) => {
-                let s = provider_anthropic::stream(c.clone(), sys, msgs, tls).await;
-                provider_anthropic::collect(s).await
-            }
-            ProviderConfig::OpenAI(c) => {
-                let s = provider_openai::stream(c.clone(), sys, msgs, tls).await;
-                provider_openai::collect(s).await
-            }
-            ProviderConfig::OpenAIResponses(c) => {
-                let s = provider_openai_responses::stream(c.clone(), sys, msgs, tls).await;
-                provider_openai_responses::collect(s).await
-            }
-            ProviderConfig::Google(c) => {
-                let s = provider_google::stream(c.clone(), sys, msgs, tls).await;
-                provider_google::collect(s).await
-            }
-            ProviderConfig::Bedrock(c) => {
-                let s = provider_bedrock::stream(c.clone(), sys, msgs, tls).await;
-                provider_bedrock::collect(s).await
-            }
-            ProviderConfig::OpenRouter(c) => {
-                let s = provider_openrouter::stream(c.clone(), sys, msgs, tls).await;
-                provider_openrouter::collect(s).await
-            }
-            ProviderConfig::Groq(c) => {
-                let s = provider_groq::stream(c.clone(), sys, msgs, tls).await;
-                provider_groq::collect(s).await
-            }
-            ProviderConfig::Cerebras(c) => {
-                let s = provider_cerebras::stream(c.clone(), sys, msgs, tls).await;
-                provider_cerebras::collect(s).await
-            }
-            ProviderConfig::Xai(c) => {
-                let s = provider_xai::stream(c.clone(), sys, msgs, tls).await;
-                provider_xai::collect(s).await
-            }
-            ProviderConfig::DeepSeek(c) => {
-                let s = provider_deepseek::stream(c.clone(), sys, msgs, tls).await;
-                provider_deepseek::collect(s).await
-            }
-            ProviderConfig::Mistral(c) => {
-                let s = provider_mistral::stream(c.clone(), sys, msgs, tls).await;
-                provider_mistral::collect(s).await
-            }
-            ProviderConfig::Fireworks(c) => {
-                let s = provider_fireworks::stream(c.clone(), sys, msgs, tls).await;
-                provider_fireworks::collect(s).await
-            }
-            ProviderConfig::KimiCoding(c) => {
-                let s = provider_kimi_coding::stream(c.clone(), sys, msgs, tls).await;
-                provider_kimi_coding::collect(s).await
-            }
-            ProviderConfig::MiniMax(c) => {
-                let s = provider_minimax::stream(c.clone(), sys, msgs, tls).await;
-                provider_minimax::collect(s).await
-            }
-            ProviderConfig::Zai(c) => {
-                let s = provider_zai::stream(c.clone(), sys, msgs, tls).await;
-                provider_zai::collect(s).await
-            }
-            ProviderConfig::HuggingFace(c) => {
-                let s = provider_huggingface::stream(c.clone(), sys, msgs, tls).await;
-                provider_huggingface::collect(s).await
-            }
-            ProviderConfig::VercelAiGateway(c) => {
-                let s = provider_vercel_ai_gateway::stream(c.clone(), sys, msgs, tls).await;
-                provider_vercel_ai_gateway::collect(s).await
-            }
-            ProviderConfig::OpencodeZen(c) => {
-                let s = provider_opencode_zen::stream(c.clone(), sys, msgs, tls).await;
-                provider_opencode_zen::collect(s).await
-            }
-            ProviderConfig::OpencodeGo(c) => {
-                let s = provider_opencode_go::stream(c.clone(), sys, msgs, tls).await;
-                provider_opencode_go::collect(s).await
-            }
-            ProviderConfig::AzureOpenAI(c) => {
-                let s = provider_azure_openai::stream(c.clone(), sys, msgs, tls).await;
-                provider_azure_openai::collect(s).await
-            }
-            ProviderConfig::GoogleVertex(c) => {
-                let s = provider_google_vertex::stream(c.clone(), sys, msgs, tls).await;
-                provider_google_vertex::collect(s).await
-            }
-        }
-    }
-
-    async fn resolve_tool(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
-        self.inner.resolve_tool(name).await
-    }
-
-    async fn before_tool_call(&self, tool_call: &ToolCall) -> HookOutcome {
-        self.inner.before_tool_call(tool_call).await
-    }
-
-    async fn after_tool_call(&self, tool_call: &ToolCall, result: ToolResult) -> ToolResult {
-        self.inner.after_tool_call(tool_call, result).await
-    }
-
-    async fn transform_context(&self, messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
-        self.inner.transform_context(messages).await
-    }
-
-    async fn drain_steering(&self, session_id: &str) -> Vec<AgentMessage> {
-        self.inner.drain_steering(session_id).await
-    }
-
-    async fn drain_followup(&self, session_id: &str) -> Vec<AgentMessage> {
-        self.inner.drain_followup(session_id).await
-    }
-
-    async fn abort_signal(&self, session_id: &str) -> bool {
-        self.inner.abort_signal(session_id).await
-    }
-}
-
-struct BashTool {
-    cwd: PathBuf,
-}
-
-#[async_trait]
-impl ToolHandler for BashTool {
-    async fn execute(&self, tool_call: &ToolCall) -> ToolResult {
-        let command = tool_call
-            .arguments
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if command.is_empty() {
-            return error_result("missing required arg: command");
-        }
-        let output = tokio::process::Command::new("bash")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(&self.cwd)
-            .output()
+impl IiiAgentDriver {
+    /// Trigger `agent::run_loop` for one initial-prompt batch. Events flow
+    /// through the engine's `agent::events/<sid>` stream, which is consumed
+    /// separately by the stream subscriber task feeding [`ChannelSink`].
+    async fn run(&self, session_id: &str, initial: Vec<AgentMessage>) {
+        let payload = json!({
+            "session_id": session_id,
+            "provider": self.provider,
+            "model": self.model,
+            "system_prompt": self.system_prompt,
+            "messages": initial,
+            "tools": self.tools,
+            "max_turns": self.max_turns,
+        });
+        let _ = self
+            .iii
+            .trigger(TriggerRequest {
+                function_id: "agent::run_loop".to_string(),
+                payload,
+                action: None,
+                timeout_ms: None,
+            })
             .await;
-        match output {
-            Ok(o) => {
-                let mut combined = String::new();
-                if !o.stdout.is_empty() {
-                    combined.push_str(&String::from_utf8_lossy(&o.stdout));
-                }
-                if !o.stderr.is_empty() {
-                    if !combined.is_empty() {
-                        combined.push('\n');
-                    }
-                    combined.push_str(&String::from_utf8_lossy(&o.stderr));
-                }
-                let truncated = combined.chars().take(30000).collect::<String>();
-                let exit = o.status.code().unwrap_or(-1);
-                ToolResult {
-                    content: vec![ContentBlock::Text(TextContent {
-                        text: format!("exit={exit}\n{truncated}"),
-                    })],
-                    details: serde_json::json!({ "exit_code": exit }),
-                    terminate: false,
-                }
-            }
-            Err(e) => error_result(&format!("bash spawn failed: {e}")),
-        }
-    }
-}
-
-fn error_result(msg: &str) -> ToolResult {
-    ToolResult {
-        content: vec![ContentBlock::Text(TextContent {
-            text: msg.to_string(),
-        })],
-        details: serde_json::json!({}),
-        terminate: false,
     }
 }
 
@@ -526,95 +344,33 @@ fn is_known_provider(p: &str) -> bool {
     )
 }
 
-fn build_provider_config(provider: &str, model: String) -> Result<ProviderConfig> {
-    let cfg = match provider {
-        "anthropic" => ProviderConfig::Anthropic(Arc::new(
-            provider_anthropic::AnthropicConfig::from_env(model)
-                .context("ANTHROPIC_API_KEY not set in environment")?,
-        )),
-        "openai" => ProviderConfig::OpenAI(Arc::new(
-            provider_openai::OpenAIConfig::from_env(model)
-                .context("OPENAI_API_KEY not set in environment")?,
-        )),
-        "openai-responses" => ProviderConfig::OpenAIResponses(Arc::new(
-            provider_openai_responses::OpenAIResponsesConfig::from_env(model)
-                .context("OPENAI_API_KEY not set in environment")?,
-        )),
-        "google" => ProviderConfig::Google(Arc::new(
-            provider_google::GoogleConfig::from_env(model)
-                .context("GOOGLE_API_KEY not set in environment")?,
-        )),
-        "bedrock" => ProviderConfig::Bedrock(Arc::new(
-            provider_bedrock::BedrockConfig::from_env(model)
-                .context("AWS Bedrock env not reachable")?,
-        )),
-        "openrouter" => ProviderConfig::OpenRouter(Arc::new(
-            provider_openrouter::OpenRouterConfig::from_env(model)
-                .context("OPENROUTER_API_KEY not set in environment")?,
-        )),
-        "groq" => ProviderConfig::Groq(Arc::new(
-            provider_groq::GroqConfig::from_env(model)
-                .context("GROQ_API_KEY not set in environment")?,
-        )),
-        "cerebras" => ProviderConfig::Cerebras(Arc::new(
-            provider_cerebras::CerebrasConfig::from_env(model)
-                .context("CEREBRAS_API_KEY not set in environment")?,
-        )),
-        "xai" => ProviderConfig::Xai(Arc::new(
-            provider_xai::XaiConfig::from_env(model)
-                .context("XAI_API_KEY not set in environment")?,
-        )),
-        "deepseek" => ProviderConfig::DeepSeek(Arc::new(
-            provider_deepseek::DeepSeekConfig::from_env(model)
-                .context("DEEPSEEK_API_KEY not set in environment")?,
-        )),
-        "mistral" => ProviderConfig::Mistral(Arc::new(
-            provider_mistral::MistralConfig::from_env(model)
-                .context("MISTRAL_API_KEY not set in environment")?,
-        )),
-        "fireworks" => ProviderConfig::Fireworks(Arc::new(
-            provider_fireworks::FireworksConfig::from_env(model)
-                .context("FIREWORKS_API_KEY not set in environment")?,
-        )),
-        "kimi-coding" => ProviderConfig::KimiCoding(Arc::new(
-            provider_kimi_coding::KimiCodingConfig::from_env(model)
-                .context("MOONSHOT_API_KEY not set in environment")?,
-        )),
-        "minimax" => ProviderConfig::MiniMax(Arc::new(
-            provider_minimax::MiniMaxConfig::from_env(model)
-                .context("MINIMAX_API_KEY not set in environment")?,
-        )),
-        "zai" => ProviderConfig::Zai(Arc::new(
-            provider_zai::ZaiConfig::from_env(model)
-                .context("ZAI_API_KEY not set in environment")?,
-        )),
-        "huggingface" => ProviderConfig::HuggingFace(Arc::new(
-            provider_huggingface::HuggingFaceConfig::from_env(model)
-                .context("HUGGINGFACE_API_KEY not set in environment")?,
-        )),
-        "vercel-ai-gateway" => ProviderConfig::VercelAiGateway(Arc::new(
-            provider_vercel_ai_gateway::VercelAiGatewayConfig::from_env(model)
-                .context("VERCEL_AI_GATEWAY_API_KEY not set in environment")?,
-        )),
-        "opencode-zen" => ProviderConfig::OpencodeZen(Arc::new(
-            provider_opencode_zen::OpencodeZenConfig::from_env(model)
-                .context("OPENCODE_ZEN_API_KEY not set in environment")?,
-        )),
-        "opencode-go" => ProviderConfig::OpencodeGo(Arc::new(
-            provider_opencode_go::OpencodeGoConfig::from_env(model)
-                .context("OPENCODE_GO_API_KEY not set in environment")?,
-        )),
-        "azure-openai" => ProviderConfig::AzureOpenAI(Arc::new(
-            provider_azure_openai::AzureOpenAIConfig::from_env(model)
-                .context("AZURE_OPENAI_API_KEY and AZURE_OPENAI_RESOURCE not set in environment")?,
-        )),
-        "google-vertex" => ProviderConfig::GoogleVertex(Arc::new(
-            provider_google_vertex::VertexConfig::from_env(model)
-                .context("GOOGLE_VERTEX_ACCESS_TOKEN and GOOGLE_VERTEX_PROJECT not set")?,
-        )),
-        other => anyhow::bail!("unknown provider '{other}'"),
-    };
-    Ok(cfg)
+/// Register the configured provider's `provider::<name>::stream_assistant`
+/// iii function on the engine. Mirrors `harness-cli`'s 21-arm dispatcher.
+async fn register_provider(iii: &III, name: &str) -> Result<()> {
+    match name {
+        "anthropic" => provider_anthropic::register_with_iii(iii).await,
+        "openai" => provider_openai::register_with_iii(iii).await,
+        "openai-responses" => provider_openai_responses::register_with_iii(iii).await,
+        "google" => provider_google::register_with_iii(iii).await,
+        "google-vertex" => provider_google_vertex::register_with_iii(iii).await,
+        "azure-openai" => provider_azure_openai::register_with_iii(iii).await,
+        "bedrock" => provider_bedrock::register_with_iii(iii).await,
+        "openrouter" => provider_openrouter::register_with_iii(iii).await,
+        "groq" => provider_groq::register_with_iii(iii).await,
+        "cerebras" => provider_cerebras::register_with_iii(iii).await,
+        "xai" => provider_xai::register_with_iii(iii).await,
+        "deepseek" => provider_deepseek::register_with_iii(iii).await,
+        "mistral" => provider_mistral::register_with_iii(iii).await,
+        "fireworks" => provider_fireworks::register_with_iii(iii).await,
+        "kimi-coding" => provider_kimi_coding::register_with_iii(iii).await,
+        "minimax" => provider_minimax::register_with_iii(iii).await,
+        "zai" => provider_zai::register_with_iii(iii).await,
+        "huggingface" => provider_huggingface::register_with_iii(iii).await,
+        "vercel-ai-gateway" => provider_vercel_ai_gateway::register_with_iii(iii).await,
+        "opencode-zen" => provider_opencode_zen::register_with_iii(iii).await,
+        "opencode-go" => provider_opencode_go::register_with_iii(iii).await,
+        other => Err(anyhow::anyhow!("unknown provider '{other}'")),
+    }
 }
 
 fn print_help() {
@@ -642,21 +398,44 @@ fn print_help() {
     println!("  Up/Down       browse submitted message history");
 }
 
-/// Bridge from TUI's `RuntimeHandle` into the shared `MemoryRuntime` instance
-/// owned by the loop runner. Cheap to clone via Arc.
-struct MemoryRuntimeHandle {
-    inner: MemoryRuntime,
+/// Bridge from TUI's `RuntimeHandle` into iii bus calls. Steering / follow-up
+/// / abort all post via `iii.trigger` so the running `agent::run_loop`
+/// session sees them on its next pull.
+struct IiiRuntimeHandle {
+    iii: Arc<III>,
 }
 
-impl RuntimeHandle for MemoryRuntimeHandle {
+impl IiiRuntimeHandle {
+    fn fire_and_forget(&self, function_id: &'static str, payload: Value) {
+        let iii = self.iii.clone();
+        tokio::spawn(async move {
+            let _ = iii
+                .trigger(TriggerRequest {
+                    function_id: function_id.to_string(),
+                    payload,
+                    action: None,
+                    timeout_ms: None,
+                })
+                .await;
+        });
+    }
+}
+
+impl RuntimeHandle for IiiRuntimeHandle {
     fn enqueue_steering(&self, session_id: &str, message: AgentMessage) {
-        self.inner.enqueue_steering(session_id, vec![message]);
+        self.fire_and_forget(
+            "agent::push_steering",
+            json!({ "session_id": session_id, "messages": vec![message] }),
+        );
     }
     fn enqueue_followup(&self, session_id: &str, message: AgentMessage) {
-        self.inner.enqueue_followup(session_id, vec![message]);
+        self.fire_and_forget(
+            "agent::push_followup",
+            json!({ "session_id": session_id, "messages": vec![message] }),
+        );
     }
     fn abort(&self, session_id: &str) {
-        self.inner.set_abort(session_id, true);
+        self.fire_and_forget("agent::abort", json!({ "session_id": session_id }));
     }
 }
 
@@ -680,32 +459,26 @@ async fn async_main() -> Result<()> {
             .to_string()
     };
 
-    let cfg = build_provider_config(&args.provider, model.clone())?;
-
     let system_prompt = if let Some(path) = &args.system_path {
         std::fs::read_to_string(path).with_context(|| format!("reading system prompt {path}"))?
     } else {
         DEFAULT_SYSTEM_PROMPT.to_string()
     };
 
+    let engine_url =
+        std::env::var("HARNESS_ENGINE_URL").unwrap_or_else(|_| "ws://127.0.0.1:49134".to_string());
+    let iii = connect_iii(&engine_url).await?;
+    let iii = Arc::new(iii);
+
+    harness_runtime::register_with_iii(iii.as_ref())
+        .await
+        .context("failed to register harness-runtime functions on iii engine")?;
+    register_provider(iii.as_ref(), &args.provider)
+        .await
+        .with_context(|| format!("failed to register provider '{}'", args.provider))?;
+
     let (sink, rx) = ChannelSink::new();
     let sink_arc: Arc<dyn EventSink> = Arc::new(sink);
-
-    let mut inner = MemoryRuntime::new(sink_arc.clone());
-    inner.register_tool("read", Arc::new(harness_runtime::tools::ReadTool));
-    inner.register_tool("write", Arc::new(harness_runtime::tools::WriteTool));
-    inner.register_tool("edit", Arc::new(harness_runtime::tools::EditTool));
-    inner.register_tool("ls", Arc::new(harness_runtime::tools::LsTool));
-    inner.register_tool("grep", Arc::new(harness_runtime::tools::GrepTool));
-    inner.register_tool("find", Arc::new(harness_runtime::tools::FindTool));
-    if !args.no_bash {
-        inner.register_tool(
-            "bash",
-            Arc::new(BashTool {
-                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            }),
-        );
-    }
 
     let session_id = format!("tui-{}", chrono::Utc::now().timestamp_millis());
     let cwd = std::env::current_dir().map_or_else(|_| ".".into(), |p| p.display().to_string());
@@ -722,21 +495,26 @@ async fn async_main() -> Result<()> {
         tools.push(bash_tool_def());
     }
 
-    let loop_cfg = LoopConfig {
-        session_id: session_id.clone(),
-        tools,
-        default_execution_mode: ExecutionMode::Parallel,
-    };
-
-    let runtime_arc = Arc::new(ProviderRuntime {
-        cfg,
-        inner: inner.clone(),
+    let driver = Arc::new(IiiAgentDriver {
+        iii: iii.clone(),
+        provider: args.provider.clone(),
+        model: model.clone(),
         system_prompt,
+        max_turns: args.max_turns,
+        tools,
     });
 
-    let runtime_handle = Arc::new(MemoryRuntimeHandle {
-        inner: inner.clone(),
-    });
+    let runtime_handle = Arc::new(IiiRuntimeHandle { iii: iii.clone() });
+
+    // Subscribe to the per-session event stream; forward decoded AgentEvents
+    // into the sink that the App drains. Best-effort — if the engine doesn't
+    // expose `stream::list` the loop still runs and the TUI just shows no
+    // intermediate events.
+    let stream_task = tokio::spawn(forward_events_from_stream(
+        iii.clone(),
+        session_id.clone(),
+        sink_arc.clone(),
+    ));
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -756,8 +534,6 @@ async fn async_main() -> Result<()> {
     match Theme::load_named(&args.theme) {
         Ok(t) => app.theme = t,
         Err(e) => {
-            // Fall back to dark + push a notification so the user sees the
-            // failure rather than getting silently downgraded.
             app.push_notification(format!(
                 "[theme] failed to load '{}' ({e}); using dark default",
                 args.theme
@@ -767,26 +543,12 @@ async fn async_main() -> Result<()> {
 
     // Optionally kick off a run with the initial prompt argument.
     if let Some(initial) = args.prompt.clone() {
-        spawn_run(
-            runtime_arc.clone(),
-            sink_arc.clone(),
-            loop_cfg.clone(),
-            initial,
-            Vec::new(),
-            args.max_turns,
-        );
+        spawn_run(driver.clone(), session_id.clone(), initial, Vec::new());
         app.status = AppStatus::Running;
     }
 
-    let result = run_event_loop(
-        &mut terminal,
-        &mut app,
-        runtime_arc,
-        sink_arc,
-        loop_cfg,
-        args.max_turns,
-    )
-    .await;
+    let result = run_event_loop(&mut terminal, &mut app, driver, session_id).await;
+    stream_task.abort();
 
     disable_raw_mode()?;
     execute!(
@@ -819,14 +581,73 @@ fn write_image_escapes(escapes: &harness_tui::render::PostDrawEscapes) -> Result
     Ok(())
 }
 
+/// Connect to the iii engine. Exits with code 2 on failure after writing a
+/// remediation hint to stderr.
+async fn connect_iii(engine_url: &str) -> Result<III> {
+    let iii = register_worker(engine_url, InitOptions::default());
+    let probe = tokio::time::timeout(std::time::Duration::from_secs(5), iii.list_functions()).await;
+    match probe {
+        Ok(Ok(_)) => Ok(iii),
+        Ok(Err(e)) => {
+            disable_raw_mode().ok();
+            eprintln!(
+                "failed to connect to iii engine at {engine_url}: {e}\n\
+                 start the engine, then retry. Override with HARNESS_ENGINE_URL."
+            );
+            std::process::exit(2);
+        }
+        Err(_) => {
+            disable_raw_mode().ok();
+            eprintln!(
+                "timed out connecting to iii engine at {engine_url}\n\
+                 start the engine, then retry. Override with HARNESS_ENGINE_URL."
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Subscribe to the per-session event stream and forward each entry into
+/// the [`ChannelSink`] the TUI's `App` is draining. Each stream item is
+/// expected to be an [`AgentEvent`] in JSON form (the runtime publishes
+/// them via `stream::set` on `agent::events/<session_id>`). Items that
+/// don't decode are silently dropped.
+async fn forward_events_from_stream(iii: Arc<III>, session_id: String, sink: Arc<dyn EventSink>) {
+    let mut last_index: usize = 0;
+    loop {
+        let resp = iii
+            .trigger(TriggerRequest {
+                function_id: "stream::list".to_string(),
+                payload: json!({
+                    "stream_name": EVENTS_STREAM,
+                    "group_id": session_id,
+                }),
+                action: None,
+                timeout_ms: None,
+            })
+            .await;
+        if let Ok(value) = resp {
+            if let Some(items) = value.get("items").and_then(Value::as_array) {
+                for item in items.iter().skip(last_index) {
+                    if let Some(data) = item.get("data") {
+                        if let Ok(event) = serde_json::from_value::<AgentEvent>(data.clone()) {
+                            sink.emit(event).await;
+                        }
+                    }
+                }
+                last_index = items.len();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
 /// Foreground event loop: pump crossterm input, drain the event channel, redraw.
 async fn run_event_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
-    runtime_arc: Arc<ProviderRuntime>,
-    sink_arc: Arc<dyn EventSink>,
-    loop_cfg: LoopConfig,
-    max_turns: usize,
+    driver: Arc<IiiAgentDriver>,
+    session_id: String,
 ) -> Result<()> {
     let tick_rate = Duration::from_millis(33); // ~30 fps
     let spinner_rate = Duration::from_millis(100);
@@ -857,14 +678,7 @@ async fn run_event_loop<B: ratatui::backend::Backend>(
                 if key.kind == KeyEventKind::Release {
                     continue;
                 }
-                handle_key(
-                    key,
-                    app,
-                    runtime_arc.clone(),
-                    sink_arc.clone(),
-                    &loop_cfg,
-                    max_turns,
-                );
+                handle_key(key, app, &driver, &session_id);
             }
         }
 
@@ -944,14 +758,7 @@ fn drain_config_reloads(app: &mut App, watcher: &ConfigWatcher) {
     }
 }
 
-fn handle_key(
-    key: KeyEvent,
-    app: &mut App,
-    runtime_arc: Arc<ProviderRuntime>,
-    sink_arc: Arc<dyn EventSink>,
-    loop_cfg: &LoopConfig,
-    max_turns: usize,
-) {
+fn handle_key(key: KeyEvent, app: &mut App, driver: &Arc<IiiAgentDriver>, session_id: &str) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
@@ -976,15 +783,7 @@ fn handle_key(
     // the dispatch arms below.
     let manager = app.keybindings.clone();
     if let Some(action) = manager.resolve(&key) {
-        if dispatch_global_action(
-            action,
-            key,
-            app,
-            &runtime_arc,
-            &sink_arc,
-            loop_cfg,
-            max_turns,
-        ) {
+        if dispatch_global_action(action, key, app, driver, session_id) {
             return;
         }
     }
@@ -1002,10 +801,8 @@ fn dispatch_global_action(
     action: KeyAction,
     key: KeyEvent,
     app: &mut App,
-    runtime_arc: &Arc<ProviderRuntime>,
-    sink_arc: &Arc<dyn EventSink>,
-    loop_cfg: &LoopConfig,
-    max_turns: usize,
+    driver: &Arc<IiiAgentDriver>,
+    session_id: &str,
 ) -> bool {
     match action {
         KeyAction::OpenHotkeys => {
@@ -1098,14 +895,7 @@ fn dispatch_global_action(
             true
         }
         KeyAction::SubmitFollowup => {
-            handle_submit(
-                app,
-                runtime_arc.clone(),
-                sink_arc.clone(),
-                loop_cfg,
-                max_turns,
-                /* followup */ true,
-            );
+            handle_submit(app, driver.clone(), session_id, /* followup */ true);
             true
         }
         KeyAction::Submit => {
@@ -1120,14 +910,7 @@ fn dispatch_global_action(
                 app.complete_file();
                 return true;
             }
-            handle_submit(
-                app,
-                runtime_arc.clone(),
-                sink_arc.clone(),
-                loop_cfg,
-                max_turns,
-                /* followup */ false,
-            );
+            handle_submit(app, driver.clone(), session_id, /* followup */ false);
             true
         }
         // Picker openers + tree-overlay actions don't fire from the global
@@ -1150,24 +933,9 @@ fn dispatch_global_action(
 
 /// Common Enter-handling: inline bash, slash, then real submit. Used by both
 /// `Submit` and `SubmitFollowup`.
-fn handle_submit(
-    app: &mut App,
-    runtime_arc: Arc<ProviderRuntime>,
-    sink_arc: Arc<dyn EventSink>,
-    loop_cfg: &LoopConfig,
-    max_turns: usize,
-    followup: bool,
-) {
+fn handle_submit(app: &mut App, driver: Arc<IiiAgentDriver>, session_id: &str, followup: bool) {
     let raw = app.editor.text();
-    if maybe_handle_inline_bash(
-        app,
-        &raw,
-        runtime_arc.clone(),
-        sink_arc.clone(),
-        loop_cfg,
-        max_turns,
-        followup,
-    ) {
+    if maybe_handle_inline_bash(app, &raw, &driver, session_id, followup) {
         return;
     }
     if maybe_handle_slash(app, &raw) {
@@ -1181,14 +949,7 @@ fn handle_submit(
     };
     if let Some(text) = submitted {
         let attachments = app.drain_attachments_as_blocks();
-        spawn_run(
-            runtime_arc,
-            sink_arc,
-            loop_cfg.clone(),
-            text,
-            attachments,
-            max_turns,
-        );
+        spawn_run(driver, session_id.to_string(), text, attachments);
         app.status = AppStatus::Running;
     }
 }
@@ -1345,10 +1106,8 @@ fn maybe_handle_slash(app: &mut App, text: &str) -> bool {
 fn maybe_handle_inline_bash(
     app: &mut App,
     text: &str,
-    runtime_arc: Arc<ProviderRuntime>,
-    sink_arc: Arc<dyn EventSink>,
-    loop_cfg: &LoopConfig,
-    max_turns: usize,
+    driver: &Arc<IiiAgentDriver>,
+    session_id: &str,
     followup: bool,
 ) -> bool {
     let parsed = match harness_tui::bash::parse(text) {
@@ -1398,30 +1157,23 @@ fn maybe_handle_inline_bash(
             .enqueue_steering(&app.session_id, harness_tui::app::user_message(&formatted));
         app.push_notification(format!("[bash steered] {}", parsed.command));
     } else if let Some(text) = app.submit_text_as_user(formatted) {
-        spawn_run(
-            runtime_arc,
-            sink_arc,
-            loop_cfg.clone(),
-            text,
-            Vec::new(),
-            max_turns,
-        );
+        spawn_run(driver.clone(), session_id.to_string(), text, Vec::new());
         app.status = AppStatus::Running;
     }
     true
 }
 
 /// Spawn the agent loop for one initial prompt on the tokio runtime. The
-/// background task owns its own `Arc` clones; the foreground keeps draining
-/// the event channel. `attachments` are content blocks (typically images)
-/// prepended before the text block on the first user message.
+/// background task triggers `agent::run_loop` over the bus and waits for it
+/// to settle; events stream through the engine and are forwarded to the
+/// TUI's `App` by the stream subscriber. `attachments` are content blocks
+/// (typically images) prepended before the text block on the first user
+/// message.
 fn spawn_run(
-    runtime: Arc<ProviderRuntime>,
-    sink: Arc<dyn EventSink>,
-    loop_cfg: LoopConfig,
+    driver: Arc<IiiAgentDriver>,
+    session_id: String,
     prompt: String,
     attachments: Vec<ContentBlock>,
-    _max_turns: usize,
 ) {
     tokio::spawn(async move {
         let mut content: Vec<ContentBlock> = attachments;
@@ -1432,7 +1184,7 @@ fn spawn_run(
             content,
             timestamp: chrono::Utc::now().timestamp_millis(),
         })];
-        let _ = run_loop(&*runtime, &*sink, &loop_cfg, initial).await;
+        driver.run(&session_id, initial).await;
     });
 }
 

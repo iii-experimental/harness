@@ -4,7 +4,7 @@ Single-agent loop runtime on [iii-engine](https://iii.dev).
 
 10 loop functions, 11 stream-event variants, 3 hook topics, 2 message-pull points. Tools register as iii functions. Hooks are independent subscribers on `agent::before_tool_call`, `agent::after_tool_call`, and `agent::transform_context`. Sessions, compaction, redaction, and document extraction self-register on the bus.
 
-> Status: 0.7.0, 0.x experimental. API surface unstable until production-proven.
+> Status: 0.8.0, 0.x experimental. API surface unstable until production-proven.
 
 ## Why
 
@@ -132,12 +132,12 @@ HOOK_EXAMPLE_DENY=dangerous,rm cargo run --release -p hook-example
 
 ## TUI
 
-> **0.7.0 caveat**: `harness-tui` still drives the loop in-process (legacy v0.5 path) and has not yet been rewired to run via the iii bus. Use `harness-cli` for an iii-first end-to-end. TUI rewire is tracked for v0.8.
-
 ```bash
 cargo build --release --bin harness-tui
 ./target/release/harness-tui --provider anthropic --model claude-sonnet-4-6
 ```
+
+Like `harness-cli`, the TUI is a thin invoker: it connects to a running iii engine, registers `harness-runtime` + the configured provider, triggers `agent::run_loop`, and renders the `agent::events/<sid>` stream. Override the engine URL with `HARNESS_ENGINE_URL`.
 
 ratatui interactive UI:
 - Multi-line editor with slash commands, `@file` fuzzy attachment, inline bash
@@ -152,9 +152,9 @@ ratatui interactive UI:
 
 ## Status
 
-Apache-2.0. v0.7.0 — sub-agent tool, oauth/auth/models on the bus, and an `harnessd` all-in-one bundle on top of v0.6.0's iii-first loop. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.7.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`. Known gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
+Apache-2.0. v0.8.0 — TUI rewired as a thin iii bus client to match the CLI. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.8.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`. Known gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
 
-`harness-tui` still drives the loop in-process — rewire to the iii bus is the headline item for v0.8. `harness-cli` is the iii-first reference today.
+Both `harness-cli` and `harness-tui` are iii-first thin invokers as of v0.8.
 
 ## Contributing
 

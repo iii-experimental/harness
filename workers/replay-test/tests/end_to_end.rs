@@ -140,14 +140,22 @@ async fn llm_router_swaps_provider_and_model() -> anyhow::Result<()> {
         ),
     );
 
-    // Stand up a fake llm-router::route function. It ignores the input and
-    // always replies with the (provider, model) pair we want the runtime to
-    // dispatch to.
+    // Stand up a fake router::decide function (the actual id llm-router
+    // registers). It ignores the routing hints and always replies with the
+    // (provider, model) pair we want the runtime to dispatch to. The
+    // `provider` field on the response is a harness-driven extension to
+    // llm-router's RoutingDecision shape — see iii-hq/workers PR.
     let _router = iii.register_function((
-        RegisterFunctionMessage::with_id("llm-router::route".to_string())
-            .with_description("Test fake: always routes to provider=faux, model=router-target".into()),
+        RegisterFunctionMessage::with_id("router::decide".to_string()).with_description(
+            "Test fake: always routes to provider=faux, model=router-target".into(),
+        ),
         |_payload: Value| async move {
-            Ok(json!({ "provider": "faux", "model": "router-target" }))
+            Ok(json!({
+                "provider": "faux",
+                "model": "router-target",
+                "reason": "test-fake",
+                "confidence": 1.0,
+            }))
         },
     ));
 

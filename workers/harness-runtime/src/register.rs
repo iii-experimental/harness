@@ -624,7 +624,7 @@ async fn persisted_append(iii: &III, session_id: &str, message: &AgentMessage) {
 
 fn register_stream_assistant(iii: &III) {
     let iii_for_handler = iii.clone();
-    // One-shot cache for `llm-router::route` presence. Resolved on the first
+    // One-shot cache for `router::decide` presence. Resolved on the first
     // `agent::stream_assistant` invocation — after that, every turn skips the
     // bus list_functions call and reads an atomic. Topology is assumed fixed
     // for the lifetime of the registered handler. If a user adds llm-router
@@ -633,7 +633,7 @@ fn register_stream_assistant(iii: &III) {
     let router_cache: Arc<RouterPresenceCache> = Arc::new(RouterPresenceCache::default());
     iii.register_function((
         RegisterFunctionMessage::with_id("agent::stream_assistant".to_string())
-            .with_description("Route a stream call to the configured provider worker, optionally going through llm-router::route when present.".to_string()),
+            .with_description("Route a stream call to the configured provider worker, optionally going through router::decide (llm-router) when present.".to_string()),
         move |payload: Value| {
             let iii = iii_for_handler.clone();
             let cache = router_cache.clone();
@@ -647,30 +647,51 @@ fn register_stream_assistant(iii: &III) {
                     })?
                     .to_string();
 
-                // llm-router integration. When `llm-router::route` is
-                // registered on the bus (i.e. user ran `iii worker add
-                // llm-router`), call it first. The router can swap the
-                // payload's `provider` / `model` based on capability rules,
-                // model catalog, cost, etc. When absent, the request is
-                // dispatched directly to the configured provider.
+                // llm-router integration. When `router::decide` is registered
+                // on the bus (i.e. user ran `iii worker add llm-router`),
+                // call it first. The router takes a `RoutingRequest` (prompt
+                // is required) and returns a `RoutingDecision` whose `model`
+                // field is the chosen model. We extract the last user
+                // message as the prompt and forward routing hints. When
+                // absent, the request is dispatched directly to the
+                // configured provider.
                 let mut routed_payload = payload.clone();
                 let mut provider = original_provider.clone();
                 if cache.has_router(&iii).await {
-                    if let Ok(resolved) = iii
-                        .trigger(TriggerRequest {
-                            function_id: "llm-router::route".to_string(),
-                            payload: payload.clone(),
-                            action: None,
-                            timeout_ms: None,
-                        })
-                        .await
-                    {
-                        if let Some(p) = resolved.get("provider").and_then(Value::as_str) {
-                            provider = p.to_string();
-                            routed_payload["provider"] = Value::String(p.to_string());
-                        }
-                        if let Some(m) = resolved.get("model").and_then(Value::as_str) {
-                            routed_payload["model"] = Value::String(m.to_string());
+                    if let Some(routing_request) = build_routing_request(&payload) {
+                        if let Ok(decision) = iii
+                            .trigger(TriggerRequest {
+                                function_id: "router::decide".to_string(),
+                                payload: routing_request,
+                                action: None,
+                                timeout_ms: None,
+                            })
+                            .await
+                        {
+                            // RoutingDecision: { model, reason, policy_id?, ab_test_id?,
+                            // fallback?, confidence, provider? }. The `provider` field is
+                            // a harness-driven extension to llm-router (see
+                            // iii-hq/workers PR). When absent, fall back to
+                            // (a) splitting `model` on `/` for namespaced ids
+                            // (`anthropic/claude-...`) (b) keeping the caller's
+                            // provider unchanged.
+                            if let Some(m) = decision.get("model").and_then(Value::as_str) {
+                                let resolved_provider = decision
+                                    .get("provider")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                                    .or_else(|| {
+                                        m.split_once('/').map(|(p, _)| p.to_string())
+                                    });
+                                if let Some(p) = resolved_provider {
+                                    provider.clone_from(&p);
+                                    routed_payload["provider"] = Value::String(p);
+                                }
+                                let model_id = m
+                                    .split_once('/')
+                                    .map_or_else(|| m.to_string(), |(_, rest)| rest.to_string());
+                                routed_payload["model"] = Value::String(model_id);
+                            }
                         }
                     }
                 }
@@ -697,7 +718,7 @@ fn register_stream_assistant(iii: &III) {
     ));
 }
 
-/// One-shot lookup cache for the `llm-router::route` function. The first
+/// One-shot lookup cache for the `router::decide` function. The first
 /// caller probes `iii.list_functions()`; later callers read an atomic.
 /// Concurrent first-callers are serialised by the `Mutex` so we issue at
 /// most one bus probe per process lifetime.
@@ -718,13 +739,70 @@ impl RouterPresenceCache {
         let present = iii
             .list_functions()
             .await
-            .map(|infos| infos.iter().any(|f| f.function_id == "llm-router::route"))
+            .map(|infos| infos.iter().any(|f| f.function_id == "router::decide"))
             .unwrap_or(false);
         self.present
             .store(present, std::sync::atomic::Ordering::Release);
         *guard = true;
         present
     }
+}
+
+/// Build the `RoutingRequest` payload llm-router's `router::decide` expects.
+///
+/// llm-router (iii-hq/workers/llm-router) declares the request type with
+/// `#[serde(deny_unknown_fields)]` and requires a non-empty `prompt`. We
+/// can't blindly forward harness's payload — it has unknown fields and no
+/// `prompt`. Instead, extract the last user message's text content as the
+/// prompt, and pass through optional routing hints when the caller supplied
+/// them (`tenant`, `feature`, `user`, `tags`, `budget_remaining_usd`,
+/// `latency_slo_ms`, `min_quality`, `classifier_id`).
+///
+/// Returns `None` when the messages array is empty or has no extractable
+/// user text — in that case the router is skipped and the loop dispatches
+/// directly to the configured provider.
+fn build_routing_request(payload: &Value) -> Option<Value> {
+    let messages = payload.get("messages").and_then(Value::as_array)?;
+    let prompt = messages.iter().rev().find_map(|m| {
+        let role = m.get("role").and_then(Value::as_str)?;
+        if role != "user" {
+            return None;
+        }
+        let content = m.get("content").and_then(Value::as_array)?;
+        let text = content
+            .iter()
+            .filter_map(|c| {
+                if c.get("type").and_then(Value::as_str) == Some("text") {
+                    c.get("text").and_then(Value::as_str)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    })?;
+
+    let mut req = json!({ "prompt": prompt });
+    for hint in [
+        "tenant",
+        "feature",
+        "user",
+        "tags",
+        "budget_remaining_usd",
+        "latency_slo_ms",
+        "min_quality",
+        "classifier_id",
+    ] {
+        if let Some(v) = payload.get(hint) {
+            req[hint] = v.clone();
+        }
+    }
+    Some(req)
 }
 
 fn register_prepare_tool(iii: &III) {

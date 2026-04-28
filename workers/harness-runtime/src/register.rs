@@ -624,13 +624,21 @@ async fn persisted_append(iii: &III, session_id: &str, message: &AgentMessage) {
 
 fn register_stream_assistant(iii: &III) {
     let iii_for_handler = iii.clone();
+    // One-shot cache for `llm-router::route` presence. Resolved on the first
+    // `agent::stream_assistant` invocation — after that, every turn skips the
+    // bus list_functions call and reads an atomic. Topology is assumed fixed
+    // for the lifetime of the registered handler. If a user adds llm-router
+    // mid-session (rare; harnessd / CLI register-then-invoke patterns set
+    // topology before the loop runs), restart to pick it up.
+    let router_cache: Arc<RouterPresenceCache> = Arc::new(RouterPresenceCache::default());
     iii.register_function((
         RegisterFunctionMessage::with_id("agent::stream_assistant".to_string())
-            .with_description("Route a stream call to the configured provider worker.".to_string()),
+            .with_description("Route a stream call to the configured provider worker, optionally going through llm-router::route when present.".to_string()),
         move |payload: Value| {
             let iii = iii_for_handler.clone();
+            let cache = router_cache.clone();
             async move {
-                let provider = payload
+                let original_provider = payload
                     .get("provider")
                     .and_then(Value::as_str)
                     .or_else(|| payload.get("provider_name").and_then(Value::as_str))
@@ -638,11 +646,40 @@ fn register_stream_assistant(iii: &III) {
                         IIIError::Handler("missing required field: provider".to_string())
                     })?
                     .to_string();
+
+                // llm-router integration. When `llm-router::route` is
+                // registered on the bus (i.e. user ran `iii worker add
+                // llm-router`), call it first. The router can swap the
+                // payload's `provider` / `model` based on capability rules,
+                // model catalog, cost, etc. When absent, the request is
+                // dispatched directly to the configured provider.
+                let mut routed_payload = payload.clone();
+                let mut provider = original_provider.clone();
+                if cache.has_router(&iii).await {
+                    if let Ok(resolved) = iii
+                        .trigger(TriggerRequest {
+                            function_id: "llm-router::route".to_string(),
+                            payload: payload.clone(),
+                            action: None,
+                            timeout_ms: None,
+                        })
+                        .await
+                    {
+                        if let Some(p) = resolved.get("provider").and_then(Value::as_str) {
+                            provider = p.to_string();
+                            routed_payload["provider"] = Value::String(p.to_string());
+                        }
+                        if let Some(m) = resolved.get("model").and_then(Value::as_str) {
+                            routed_payload["model"] = Value::String(m.to_string());
+                        }
+                    }
+                }
+
                 let target = format!("provider::{provider}::stream_assistant");
                 let assistant = match iii
                     .trigger(TriggerRequest {
                         function_id: target.clone(),
-                        payload: payload.clone(),
+                        payload: routed_payload,
                         action: None,
                         timeout_ms: None,
                     })
@@ -658,6 +695,36 @@ fn register_stream_assistant(iii: &III) {
             }
         },
     ));
+}
+
+/// One-shot lookup cache for the `llm-router::route` function. The first
+/// caller probes `iii.list_functions()`; later callers read an atomic.
+/// Concurrent first-callers are serialised by the `Mutex` so we issue at
+/// most one bus probe per process lifetime.
+#[derive(Default)]
+struct RouterPresenceCache {
+    init: tokio::sync::Mutex<bool>,
+    present: std::sync::atomic::AtomicBool,
+}
+
+impl RouterPresenceCache {
+    async fn has_router(&self, iii: &III) -> bool {
+        // Fast path: already initialised.
+        let mut guard = self.init.lock().await;
+        if *guard {
+            return self.present.load(std::sync::atomic::Ordering::Acquire);
+        }
+        // Slow path: probe once, record, release.
+        let present = iii
+            .list_functions()
+            .await
+            .map(|infos| infos.iter().any(|f| f.function_id == "llm-router::route"))
+            .unwrap_or(false);
+        self.present
+            .store(present, std::sync::atomic::Ordering::Release);
+        *guard = true;
+        present
+    }
 }
 
 fn register_prepare_tool(iii: &III) {

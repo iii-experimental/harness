@@ -52,7 +52,10 @@ iii worker add sandbox
 # Tier 3 — smart provider routing (production deployment shape)
 iii worker add llm-router
 ./target/release/harness "say hi"
-# → llm-router decides which provider::<name>::stream_assistant to dispatch to.
+# → agent::stream_assistant calls llm-router::route first when registered.
+# → The router can swap provider/model based on capabilities, cost, fallbacks.
+# → When llm-router isn't on the bus, harness dispatches directly to the
+#   configured provider. No flag, no config — bus presence decides.
 
 # Tier 4 — policy enforcement
 cargo run --release --bin policy-denylist -- --deny "bash:rm -rf,sudo" &

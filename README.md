@@ -4,7 +4,7 @@ Single-agent loop runtime on [iii-engine](https://iii.dev).
 
 10 loop functions, 11 stream-event variants, 3 hook topics, 2 message-pull points. Tools register as iii functions. Hooks are independent subscribers on `agent::before_tool_call`, `agent::after_tool_call`, and `agent::transform_context`. Sessions, compaction, redaction, and document extraction self-register on the bus.
 
-> Status: 0.8.0, 0.x experimental. API surface unstable until production-proven.
+> Status: 0.9.0, 0.x experimental. API surface unstable until production-proven.
 
 ## Why
 
@@ -16,7 +16,7 @@ Modern agent harnesses bundle the loop, the tool sandbox, the provider clients, 
 - OAuth subscription auth → 5 `oauth-*` workers (`oauth::<name>::{login,refresh,status}`)
 - Credential vault → `auth-storage` (`auth::{get,set,delete}_token`, `auth::list_providers`, `auth::status`)
 - Models catalog → `models-catalog` (`models::{list,get,supports}`)
-- Sessions + forks + HTML export → `session-tree` (5 iii functions: `session::fork`, `session::clone`, `session::compact`, `session::tree`, `session::export_html`)
+- Sessions + forks + HTML export + persistent transcripts → `session-tree` (8 iii functions: `session::fork`, `session::clone`, `session::compact`, `session::tree`, `session::export_html`, `session::create`, `session::append`, `session::messages`). When registered, `agent::run_loop` automatically hydrates from the existing transcript on entry and persists every new turn on exit.
 - Auto-compaction on overflow → `context-compaction` subscribes to `agent::events`, republishes overflow signals to `agent::transform_context`
 - Session corpus / redact / publish → `session-corpus` (4 iii functions: `corpus::scan`, `corpus::redact`, `corpus::review`, `corpus::publish`)
 - Document text extraction (PDF, DOCX) → `document-extract` (`document::extract`)
@@ -152,7 +152,7 @@ ratatui interactive UI:
 
 ## Status
 
-Apache-2.0. v0.8.0 — TUI rewired as a thin iii bus client to match the CLI. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.8.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`. Known gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
+Apache-2.0. v0.9.0 — `agent::run_loop` now persists through `session-tree` when the worker is registered: new sessions are hydrated on entry and appended to on exit. Sessions survive across calls and forks have a real transcript. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.9.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`. Known gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
 
 Both `harness-cli` and `harness-tui` are iii-first thin invokers as of v0.8.
 

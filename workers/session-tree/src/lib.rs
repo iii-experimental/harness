@@ -678,6 +678,9 @@ pub mod function_ids {
     pub const COMPACT: &str = "session::compact";
     pub const TREE: &str = "session::tree";
     pub const EXPORT_HTML: &str = "session::export_html";
+    pub const CREATE: &str = "session::create";
+    pub const APPEND: &str = "session::append";
+    pub const MESSAGES: &str = "session::messages";
 }
 
 /// Register the five `session::*` iii functions on `iii`, backed by `store`.
@@ -806,7 +809,7 @@ where
         )),
     );
 
-    let store_html = store;
+    let store_html = store.clone();
     refs.push(iii.register_function(
         (
             RegisterFunctionMessage::with_id(function_ids::EXPORT_HTML.into()).with_description(
@@ -829,7 +832,93 @@ where
         ),
     ));
 
+    let store_create = store_for_create(&store);
+    refs.push(
+        iii.register_function((
+            RegisterFunctionMessage::with_id(function_ids::CREATE.into())
+                .with_description("Create a new empty session record".into()),
+            move |payload: serde_json::Value| {
+                let store = store_create.clone();
+                async move {
+                    let display_name = payload
+                        .get("display_name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let cwd = payload
+                        .get("cwd")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let new_id = create_session(store.as_ref(), display_name, cwd)
+                        .await
+                        .map_err(|e| IIIError::Handler(e.to_string()))?;
+                    Ok(json!({ "session_id": new_id }))
+                }
+            },
+        )),
+    );
+
+    let store_append = store_for_append(&store);
+    refs.push(
+        iii.register_function((
+            RegisterFunctionMessage::with_id(function_ids::APPEND.into())
+                .with_description("Append an AgentMessage entry to a session".into()),
+            move |payload: serde_json::Value| {
+                let store = store_append.clone();
+                async move {
+                    let session_id = required_str(&payload, "session_id")?;
+                    let parent_id = payload
+                        .get("parent_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string);
+                    let message_value = payload.get("message").cloned().ok_or_else(|| {
+                        IIIError::Handler("missing required field: message".into())
+                    })?;
+                    let message: AgentMessage = serde_json::from_value(message_value)
+                        .map_err(|e| IIIError::Handler(format!("invalid message: {e}")))?;
+                    let entry_id = append_message(store.as_ref(), &session_id, parent_id, message)
+                        .await
+                        .map_err(|e| IIIError::Handler(e.to_string()))?;
+                    Ok(json!({ "entry_id": entry_id }))
+                }
+            },
+        )),
+    );
+
+    let store_messages = store;
+    refs.push(iii.register_function((
+        RegisterFunctionMessage::with_id(function_ids::MESSAGES.into()).with_description(
+            "Load every AgentMessage on the active path of a session, oldest first".into(),
+        ),
+        move |payload: serde_json::Value| {
+            let store = store_messages.clone();
+            async move {
+                let session_id = required_str(&payload, "session_id")?;
+                let leaf = payload
+                    .get("branch_leaf")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string);
+                let messages = load_messages(store.as_ref(), &session_id, leaf.as_deref())
+                    .await
+                    .map_err(|e| IIIError::Handler(e.to_string()))?;
+                Ok(json!({ "messages": messages }))
+            }
+        },
+    )));
+
     SessionFunctionRefs { refs }
+}
+
+fn store_for_create<S>(s: &std::sync::Arc<S>) -> std::sync::Arc<S>
+where
+    S: ?Sized,
+{
+    s.clone()
+}
+fn store_for_append<S>(s: &std::sync::Arc<S>) -> std::sync::Arc<S>
+where
+    S: ?Sized,
+{
+    s.clone()
 }
 
 /// Handle returned by [`register_with_iii`]. Drop or call

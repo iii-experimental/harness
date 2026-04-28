@@ -449,22 +449,97 @@ fn register_run_loop(iii: &III) {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let messages =
+                let incoming =
                     decode_field::<Vec<AgentMessage>>(&payload, "messages")?.unwrap_or_default();
                 let tools = decode_field::<Vec<AgentTool>>(&payload, "tools")?.unwrap_or_default();
 
+                // Persistent-session integration: when `session-tree` is
+                // registered on the bus, hydrate the existing transcript via
+                // `session::messages`, append the incoming user batch via
+                // `session::append`, and persist new turns at exit. When the
+                // worker isn't loaded, both calls fail-soft and the loop runs
+                // with the in-memory `Vec` it always has.
+                let persisted = persisted_load_messages(&iii, &session_id).await;
+                let baseline_count = persisted.len();
+                let mut messages: Vec<AgentMessage> = if persisted.is_empty() {
+                    incoming.clone()
+                } else {
+                    let mut combined = persisted;
+                    combined.extend(incoming.clone());
+                    combined
+                };
+                for m in &incoming {
+                    let _ = persisted_append(&iii, &session_id, m).await;
+                }
+
                 let runtime = IiiRuntime::with_session(iii.clone(), provider, model, system_prompt);
-                let sink = IiiSink::new(iii, session_id.clone());
+                let sink = IiiSink::new(iii.clone(), session_id.clone());
                 let cfg = LoopConfig {
-                    session_id,
+                    session_id: session_id.clone(),
                     tools,
                     default_execution_mode: ExecutionMode::Parallel,
                 };
-                let outcome = run_loop(&runtime, &sink, &cfg, messages).await;
+                let outcome = run_loop(&runtime, &sink, &cfg, std::mem::take(&mut messages)).await;
+
+                // Append every message produced during the loop (post-baseline)
+                // back to the session-tree store, so the next call resumes
+                // from a complete transcript.
+                let total = outcome.messages.len();
+                let new_floor = baseline_count + incoming.len();
+                if total > new_floor {
+                    for m in outcome.messages.iter().skip(new_floor) {
+                        let _ = persisted_append(&iii, &session_id, m).await;
+                    }
+                }
+
                 Ok(json!({ "messages": outcome.messages }))
             }
         },
     ));
+}
+
+/// Best-effort: ask `session::messages` for the active path's transcript.
+/// Returns `Vec::new()` if the function isn't registered, the call errors,
+/// or the response is empty/malformed. Never propagates failure.
+async fn persisted_load_messages(iii: &III, session_id: &str) -> Vec<AgentMessage> {
+    let resp = iii
+        .trigger(TriggerRequest {
+            function_id: "session::messages".to_string(),
+            payload: json!({ "session_id": session_id }),
+            action: None,
+            timeout_ms: None,
+        })
+        .await;
+    let value = match resp {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    value
+        .get("messages")
+        .cloned()
+        .map(serde_json::from_value::<Vec<AgentMessage>>)
+        .transpose()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Best-effort: append one message to the session-tree store via
+/// `session::append`. Silently swallows missing-function / error responses
+/// so the loop can run without `session-tree` registered.
+async fn persisted_append(iii: &III, session_id: &str, message: &AgentMessage) {
+    let payload = match serde_json::to_value(message) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let _ = iii
+        .trigger(TriggerRequest {
+            function_id: "session::append".to_string(),
+            payload: json!({ "session_id": session_id, "message": payload }),
+            action: None,
+            timeout_ms: None,
+        })
+        .await;
 }
 
 fn register_stream_assistant(iii: &III) {

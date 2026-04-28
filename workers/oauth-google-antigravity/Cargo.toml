@@ -22,3 +22,6 @@ url = { workspace = true }
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
+iii-sdk = { workspace = true }
+anyhow = { workspace = true }
+log = "0.4"

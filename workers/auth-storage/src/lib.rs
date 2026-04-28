@@ -215,6 +215,153 @@ fn label_for(cred: &Credential) -> String {
     }
 }
 
+/// Register `auth::*` iii functions on the bus.
+///
+/// Functions registered:
+/// - `auth::get_token` — payload `{ provider }`, returns the stored
+///   credential or `null`
+/// - `auth::set_token` — payload matches [`Credential`] with a `provider`
+///   field added; returns `{ ok: true }`
+/// - `auth::delete_token` — payload `{ provider }`; returns `{ ok: true }`
+/// - `auth::list_providers` — returns `{ providers: [<provider>...] }`
+/// - `auth::status` — payload `{ provider }`, returns an [`AuthStatus`]
+///   merging stored creds and the process env
+///
+/// `store` is the backend the handlers read/write through. Tests pass an
+/// [`InMemoryStore`]; production callers pass an iii-state-backed impl.
+pub async fn register_with_iii(
+    iii: &iii_sdk::III,
+    store: std::sync::Arc<dyn CredentialStore>,
+) -> anyhow::Result<AuthFunctionRefs> {
+    use iii_sdk::{IIIError, RegisterFunctionMessage};
+    use serde_json::{json, Value};
+
+    let store_get = store.clone();
+    let get_token = iii.register_function((
+        RegisterFunctionMessage::with_id("auth::get_token".to_string())
+            .with_description("Fetch the stored credential for a provider.".into()),
+        move |payload: Value| {
+            let store = store_get.clone();
+            async move {
+                let provider = payload
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?
+                    .to_string();
+                let cred = store.get(&provider).await;
+                serde_json::to_value(cred).map_err(|e| IIIError::Handler(e.to_string()))
+            }
+        },
+    ));
+
+    let store_set = store.clone();
+    let set_token = iii.register_function((
+        RegisterFunctionMessage::with_id("auth::set_token".to_string())
+            .with_description("Persist a credential for a provider.".into()),
+        move |payload: Value| {
+            let store = store_set.clone();
+            async move {
+                let provider = payload
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?
+                    .to_string();
+                let cred_value = payload.get("credential").cloned().ok_or_else(|| {
+                    IIIError::Handler("missing required field: credential".into())
+                })?;
+                let cred: Credential = serde_json::from_value(cred_value)
+                    .map_err(|e| IIIError::Handler(format!("invalid credential: {e}")))?;
+                store.set(&provider, cred).await;
+                Ok(json!({ "ok": true }))
+            }
+        },
+    ));
+
+    let store_del = store.clone();
+    let delete_token = iii.register_function((
+        RegisterFunctionMessage::with_id("auth::delete_token".to_string())
+            .with_description("Remove the stored credential for a provider.".into()),
+        move |payload: Value| {
+            let store = store_del.clone();
+            async move {
+                let provider = payload
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?
+                    .to_string();
+                store.clear(&provider).await;
+                Ok(json!({ "ok": true }))
+            }
+        },
+    ));
+
+    let store_list = store.clone();
+    let list_providers = iii.register_function((
+        RegisterFunctionMessage::with_id("auth::list_providers".to_string())
+            .with_description("List every provider with a stored credential.".into()),
+        move |_payload: Value| {
+            let store = store_list.clone();
+            async move {
+                let entries = store.list().await;
+                let providers: Vec<String> = entries.into_iter().map(|(p, _)| p).collect();
+                Ok(json!({ "providers": providers }))
+            }
+        },
+    ));
+
+    let store_status = store.clone();
+    let status = iii.register_function((
+        RegisterFunctionMessage::with_id("auth::status".to_string())
+            .with_description("Report stored vs. env credential status for a provider.".into()),
+        move |payload: Value| {
+            let store = store_status.clone();
+            async move {
+                let provider = payload
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?
+                    .to_string();
+                let resolved =
+                    resolve_credential(&*store, &provider, |var| std::env::var(var).ok()).await;
+                let st = status_for(resolved.as_ref());
+                serde_json::to_value(st).map_err(|e| IIIError::Handler(e.to_string()))
+            }
+        },
+    ));
+
+    Ok(AuthFunctionRefs {
+        get_token,
+        set_token,
+        delete_token,
+        list_providers,
+        status,
+    })
+}
+
+/// Handles returned by [`register_with_iii`]. Calling `unregister_all`
+/// removes every function from the bus.
+pub struct AuthFunctionRefs {
+    pub get_token: iii_sdk::FunctionRef,
+    pub set_token: iii_sdk::FunctionRef,
+    pub delete_token: iii_sdk::FunctionRef,
+    pub list_providers: iii_sdk::FunctionRef,
+    pub status: iii_sdk::FunctionRef,
+}
+
+impl AuthFunctionRefs {
+    pub fn unregister_all(self) {
+        for r in [
+            self.get_token,
+            self.set_token,
+            self.delete_token,
+            self.list_providers,
+            self.status,
+        ] {
+            r.unregister();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -111,6 +111,115 @@ fn supports_model(m: &Model, capability: Capability) -> bool {
     }
 }
 
+/// Register `models::*` iii functions on the bus.
+///
+/// Functions registered:
+/// - `models::list` — payload `{ provider?, capability? }`, returns
+///   `{ models: [<Model>...] }`
+/// - `models::get` — payload `{ provider, model_id }`, returns the model
+///   or `null`
+/// - `models::supports` — payload `{ provider, model_id, capability }`,
+///   returns `{ supported: bool }`
+pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<ModelsFunctionRefs> {
+    use iii_sdk::{IIIError, RegisterFunctionMessage};
+    use serde_json::{json, Value};
+
+    let list_fn = iii.register_function((
+        RegisterFunctionMessage::with_id("models::list".to_string())
+            .with_description("List models, optionally filtered by provider or capability.".into()),
+        move |payload: Value| async move {
+            let provider = payload
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let capability = payload
+                .get("capability")
+                .and_then(Value::as_str)
+                .and_then(parse_capability);
+            let filter = ListFilter {
+                provider,
+                capability,
+            };
+            let models = list(&filter);
+            serde_json::to_value(json!({ "models": models }))
+                .map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    ));
+
+    let get_fn = iii.register_function((
+        RegisterFunctionMessage::with_id("models::get".to_string())
+            .with_description("Look up a single model by (provider, model_id).".into()),
+        move |payload: Value| async move {
+            let provider = payload
+                .get("provider")
+                .and_then(Value::as_str)
+                .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?;
+            let model_id = payload
+                .get("model_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| IIIError::Handler("missing required field: model_id".into()))?;
+            let model = get(provider, model_id);
+            serde_json::to_value(model).map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    ));
+
+    let supports_fn = iii.register_function((
+        RegisterFunctionMessage::with_id("models::supports".to_string())
+            .with_description("Check whether a model supports a capability.".into()),
+        move |payload: Value| async move {
+            let provider = payload
+                .get("provider")
+                .and_then(Value::as_str)
+                .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?;
+            let model_id = payload
+                .get("model_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| IIIError::Handler("missing required field: model_id".into()))?;
+            let capability = payload
+                .get("capability")
+                .and_then(Value::as_str)
+                .and_then(parse_capability)
+                .ok_or_else(|| IIIError::Handler("missing or unknown capability".into()))?;
+            Ok(json!({ "supported": supports(provider, model_id, capability) }))
+        },
+    ));
+
+    Ok(ModelsFunctionRefs {
+        list: list_fn,
+        get: get_fn,
+        supports: supports_fn,
+    })
+}
+
+fn parse_capability(s: &str) -> Option<Capability> {
+    match s {
+        "thinking" => Some(Capability::Thinking),
+        "thinking:low" => Some(Capability::ThinkingLevel(ThinkingLevel::Low)),
+        "thinking:medium" => Some(Capability::ThinkingLevel(ThinkingLevel::Medium)),
+        "thinking:high" => Some(Capability::ThinkingLevel(ThinkingLevel::High)),
+        "thinking:xhigh" => Some(Capability::ThinkingLevel(ThinkingLevel::Xhigh)),
+        "tools" => Some(Capability::Tools),
+        "vision" => Some(Capability::Vision),
+        "cache" => Some(Capability::Cache),
+        _ => None,
+    }
+}
+
+/// Handles returned by [`register_with_iii`].
+pub struct ModelsFunctionRefs {
+    pub list: iii_sdk::FunctionRef,
+    pub get: iii_sdk::FunctionRef,
+    pub supports: iii_sdk::FunctionRef,
+}
+
+impl ModelsFunctionRefs {
+    pub fn unregister_all(self) {
+        for r in [self.list, self.get, self.supports] {
+            r.unregister();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

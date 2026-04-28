@@ -4,7 +4,7 @@ Single-agent loop runtime on [iii-engine](https://iii.dev).
 
 10 loop functions, 11 stream-event variants, 3 hook topics, 2 message-pull points. Tools register as iii functions. Hooks are independent subscribers on `agent::before_tool_call`, `agent::after_tool_call`, and `agent::transform_context`. Sessions, compaction, redaction, and document extraction self-register on the bus.
 
-> Status: 0.6.0, 0.x experimental. API surface unstable until production-proven.
+> Status: 0.7.0, 0.x experimental. API surface unstable until production-proven.
 
 ## Why
 
@@ -12,15 +12,18 @@ Modern agent harnesses bundle the loop, the tool sandbox, the provider clients, 
 
 `harness` keeps the loop and nothing else. Every other concern is a worker on the iii bus:
 
-- Provider streaming → 23 narrow `provider-*` workers
-- OAuth subscription auth → 5 narrow `oauth-*` workers
+- Provider streaming → 22 `provider-*` workers (`provider::<name>::stream_assistant`)
+- OAuth subscription auth → 5 `oauth-*` workers (`oauth::<name>::{login,refresh,status}`)
+- Credential vault → `auth-storage` (`auth::{get,set,delete}_token`, `auth::list_providers`, `auth::status`)
+- Models catalog → `models-catalog` (`models::{list,get,supports}`)
 - Sessions + forks + HTML export → `session-tree` (5 iii functions: `session::fork`, `session::clone`, `session::compact`, `session::tree`, `session::export_html`)
 - Auto-compaction on overflow → `context-compaction` subscribes to `agent::events`, republishes overflow signals to `agent::transform_context`
 - Session corpus / redact / publish → `session-corpus` (4 iii functions: `corpus::scan`, `corpus::redact`, `corpus::review`, `corpus::publish`)
 - Document text extraction (PDF, DOCX) → `document-extract` (`document::extract`)
-- Models catalog → `models-catalog` worker
+- Sub-agents → `tool::run_subagent` invokes `agent::run_loop` recursively with a child session id
+- All-in-one bundle → `harnessd serve` registers everything in one process
 - Hook subscribers → any worker can `subscribe` on the three hook topics; see `hook-example` for a reference impl
-- Sandbox isolation → existing iii-sandbox worker
+- Sandbox isolation → existing iii-sandbox worker (auto-discovered by `tool::bash`)
 - MCP / A2A bridges → existing iii workers
 
 Loop in Rust. Tools in any language. Hot-add capabilities at runtime. One trace through everything.
@@ -129,6 +132,8 @@ HOOK_EXAMPLE_DENY=dangerous,rm cargo run --release -p hook-example
 
 ## TUI
 
+> **0.7.0 caveat**: `harness-tui` still drives the loop in-process (legacy v0.5 path) and has not yet been rewired to run via the iii bus. Use `harness-cli` for an iii-first end-to-end. TUI rewire is tracked for v0.8.
+
 ```bash
 cargo build --release --bin harness-tui
 ./target/release/harness-tui --provider anthropic --model claude-sonnet-4-6
@@ -147,9 +152,9 @@ ratatui interactive UI:
 
 ## Status
 
-Apache-2.0. v0.6.0 — first release where loop, tools, and providers actually run as iii functions on the bus (Phase A iii-first). See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.6.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`.
+Apache-2.0. v0.7.0 — sub-agent tool, oauth/auth/models on the bus, and an `harnessd` all-in-one bundle on top of v0.6.0's iii-first loop. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.7.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`. Known gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
 
-Sub-agent spawn (`agent::run_loop` invoked recursively for parent-child traces) remains aspirational — the loop functions and bridge are in place, but the recursive convention is not yet wired or fixture-tested.
+`harness-tui` still drives the loop in-process — rewire to the iii bus is the headline item for v0.8. `harness-cli` is the iii-first reference today.
 
 ## Contributing
 

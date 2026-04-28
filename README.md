@@ -2,11 +2,70 @@
 
 Single-agent loop runtime on [iii-engine](https://iii.dev). 44 narrow workers, all iii-first.
 
-The agent loop is a state machine. Every concern outside the state machine is a worker on the iii bus. Both reference binaries (`harness-cli`, `harness-tui`) are thin invokers — they connect to a running iii engine, register the runtime + a provider, trigger `agent::run_loop`, and consume the per-session events stream.
-
 > Status: 0.11.0, 0.x experimental. API surface unstable until production-proven.
 
+## Install
+
+```bash
+# 1. iii engine (prerequisite)
+curl -fsSL https://install.iii.dev/iii/main/install.sh | sh
+
+# 2. harness (from source — crates.io publish lands at v1.0)
+git clone https://github.com/iii-experimental/harness && cd harness
+cargo build --release --bin harness --bin harness-tui --bin harnessd
+```
+
+Or, once shipped, use the harness installer that wraps both:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iii-experimental/harness/main/install.sh | sh
+```
+
+## Quick start
+
+```bash
+# 1. Boot an iii engine
+iii --use-default-config &
+
+# 2. Run the agent
+export ANTHROPIC_API_KEY=sk-ant-...
+./target/release/harness "summarise this repo and list workspace crates using ls."
+```
+
+You should see the agent stream events as it reads the README, calls `ls` on `workers/`, and produces a final summary.
+
+## Composability ladder
+
+The whole point of harness: every capability is one `iii worker add` away. Watch the agent gain power without touching harness code.
+
+```bash
+# Tier 1 — baseline
+./target/release/harness "run uname -a"
+# → tool::bash spawns a host child process. Plain.
+
+# Tier 2 — sandboxed bash (microVM isolation)
+iii worker add sandbox
+./target/release/harness "run uname -a"
+# → tool::bash auto-routes through sandbox::exec. Host filesystem untouched.
+# → No flag changed in harness. Bus is the source of truth.
+
+# Tier 3 — smart provider routing (production deployment shape)
+iii worker add llm-router
+./target/release/harness "say hi"
+# → llm-router decides which provider::<name>::stream_assistant to dispatch to.
+
+# Tier 4 — policy enforcement
+cargo run --release --bin policy-denylist -- --deny "bash:rm -rf,sudo" &
+./target/release/harness "delete all logs"
+# → before_tool_call fan-out. policy-denylist replies { block: true, reason }.
+# → Loop blocks the call. Agent sees the block, plans around it.
+```
+
+Each tier = one worker addition. No code change in harness. This is iii primitives + narrow workers in practice.
+
 ## Architecture
+
+The agent loop is a state machine. Every concern outside the state machine is a worker on the iii bus. Both reference binaries (`harness-cli`, `harness-tui`) are thin invokers — they connect to a running iii engine, register the runtime + a provider, trigger `agent::run_loop`, and consume the per-session events stream.
 
 ```
                                                     +---------------------------+
@@ -85,28 +144,6 @@ The loop adds:
 - **2 semantic rules** — terminate-batch (all-must-true), sequential-override (any forces all)
 
 That is the entire vocabulary. Implementation details (auth, models, providers, storage, hooks) are workers consumed through iii functions or pubsub topics.
-
-## Quick start
-
-```bash
-# 1. Boot an iii engine on the default port
-iii --use-default-config &
-
-# 2. Build the binaries
-cargo build --release --bin harness --bin harness-tui --bin harnessd
-
-# 3. (Optional) Add the iii-sandbox worker — bash auto-routes through the microVM
-iii worker add sandbox
-
-# 4. (Optional) Run the all-in-one daemon to register every harness worker
-./target/release/harnessd serve --providers all &
-
-# 5. Run the agent
-export ANTHROPIC_API_KEY=sk-ant-...
-./target/release/harness "open README.md, summarise it in three sentences."
-```
-
-When the iii-sandbox worker is registered, the harness's `bash` tool routes through the sandbox automatically — same surface, host filesystem isolated. No flag.
 
 ## CLI
 

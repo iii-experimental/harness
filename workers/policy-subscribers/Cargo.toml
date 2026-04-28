@@ -1,0 +1,42 @@
+[package]
+name = "policy-subscribers"
+description = "Reference iii hook subscribers for production deployments: denylist policy enforcer, append-only audit log, secret-scrubbing DLP. Each ships as a standalone binary that connects to a running iii engine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+harness-runtime = { path = "../harness-runtime" }
+harness-types = { path = "../harness-types" }
+overflow-classify = { path = "../overflow-classify" }
+iii-sdk = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+once_cell = { workspace = true }
+log = "0.4"
+env_logger = "0.11"
+
+[lib]
+name = "policy_subscribers"
+path = "src/lib.rs"
+
+[[bin]]
+name = "policy-denylist"
+path = "src/bin/denylist.rs"
+
+[[bin]]
+name = "audit-log"
+path = "src/bin/audit_log.rs"
+
+[[bin]]
+name = "dlp-scrubber"
+path = "src/bin/dlp_scrubber.rs"

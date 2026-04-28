@@ -4,7 +4,7 @@ Single-agent loop runtime on [iii-engine](https://iii.dev).
 
 10 loop functions, 11 stream-event variants, 3 hook topics, 2 message-pull points. Tools register as iii functions. Hooks are independent subscribers on `agent::before_tool_call`, `agent::after_tool_call`, and `agent::transform_context`. Sessions, compaction, redaction, and document extraction self-register on the bus.
 
-> Status: 0.10.0, 0.x experimental. API surface unstable until production-proven.
+> Status: 0.11.0, 0.x experimental. API surface unstable until production-proven.
 
 ## Why
 
@@ -152,7 +152,7 @@ ratatui interactive UI:
 
 ## Status
 
-Apache-2.0. v0.10.0 — collected pubsub workaround so hook subscribers can actually block tool calls + modify results + rewrite context. End-to-end integration test gated on `IIIX_TEST_ENGINE_URL`. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.10.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`. Remaining SDK gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
+Apache-2.0. v0.11.0 — `policy-subscribers` reference workers (denylist, audit log, DLP scrubber), refreshed `ARCHITECTURE.md`, end-to-end test verified live against an iii engine. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.11.0). Remaining SDK gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
 
 Both `harness-cli` and `harness-tui` are iii-first thin invokers as of v0.8.
 

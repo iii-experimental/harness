@@ -165,12 +165,17 @@ async fn main() -> Result<()> {
 
     let printer = tokio::spawn(stream_events(iii.clone(), session_id.clone()));
 
+    // iii-sdk defaults `None` to a 30s timeout (DEFAULT_TIMEOUT_MS in iii.rs).
+    // agent::run_loop drives a multi-turn LLM + tool loop and routinely runs
+    // longer than that; without an explicit cap it dies mid-turn with
+    // "invocation timed out" while the engine is still healthy. 10 minutes is
+    // generous enough for tool-heavy turns but still bounds runaway loops.
     let response = iii
         .trigger(TriggerRequest {
             function_id: "agent::run_loop".to_string(),
             payload,
             action: None,
-            timeout_ms: None,
+            timeout_ms: Some(600_000),
         })
         .await
         .context("agent::run_loop failed")?;
@@ -189,6 +194,14 @@ async fn main() -> Result<()> {
     eprintln!("\n=== summary ===");
     eprintln!("turns: {}", count_turns(&messages));
     eprintln!("messages: {}", messages.len());
+    if let Some(AgentMessage::Assistant(a)) = messages.iter().rev().find(|m| matches!(m, AgentMessage::Assistant(_))) {
+        eprintln!("last_stop_reason: {:?}", a.stop_reason);
+        for block in &a.content {
+            if let ContentBlock::Text(t) = block {
+                eprintln!("last_text: {}", t.text);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -379,6 +392,24 @@ async fn register_provider(iii: &III, provider: &str) -> Result<()> {
         "opencode-go" => provider_opencode_go::register_with_iii(iii).await,
         "azure-openai" => provider_azure_openai::register_with_iii(iii).await,
         "google-vertex" => provider_google_vertex::register_with_iii(iii).await,
+        "faux" => {
+            // Zero-config smoke-test path: register a canned response keyed
+            // on a fixed model id so `harness --provider faux --model echo`
+            // round-trips without any API key. Real test harnesses install
+            // their own canned responses via `provider_faux::register_canned`
+            // before invocation; this default only fires when nothing else
+            // has registered the key.
+            provider_faux::register_canned(
+                "echo",
+                provider_faux::text_only(
+                    "hello from faux — this is the harness zero-config smoke path.",
+                    "echo",
+                    "faux",
+                    chrono::Utc::now().timestamp_millis(),
+                ),
+            );
+            provider_faux::register_with_iii(iii).await
+        }
         other => anyhow::bail!("unknown provider '{other}'"),
     }
 }

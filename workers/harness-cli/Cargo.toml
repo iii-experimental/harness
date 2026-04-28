@@ -35,6 +35,7 @@ provider-opencode-zen = { path = "../provider-opencode-zen" }
 provider-opencode-go = { path = "../provider-opencode-go" }
 provider-azure-openai = { path = "../provider-azure-openai" }
 provider-google-vertex = { path = "../provider-google-vertex" }
+provider-faux = { path = "../provider-faux" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

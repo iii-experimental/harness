@@ -61,13 +61,16 @@ impl IiiAgentDriver {
             "tools": self.tools,
             "max_turns": self.max_turns,
         });
+        // iii-sdk defaults None to 30s; agent::run_loop is multi-turn and
+        // routinely runs longer. Cap at 10 minutes so the loop completes
+        // instead of timing out under healthy conditions.
         let _ = self
             .iii
             .trigger(TriggerRequest {
                 function_id: "agent::run_loop".to_string(),
                 payload,
                 action: None,
-                timeout_ms: None,
+                timeout_ms: Some(600_000),
             })
             .await;
     }

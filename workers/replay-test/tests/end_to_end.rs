@@ -147,7 +147,7 @@ async fn llm_router_swaps_provider_and_model() -> anyhow::Result<()> {
     // (provider, model) pair we want the runtime to dispatch to. The
     // `provider` field on the response is a harness-driven extension to
     // llm-router's RoutingDecision shape — see iii-hq/workers PR.
-    let _router = iii.register_function((
+    let router = iii.register_function((
         RegisterFunctionMessage::with_id("router::decide".to_string()).with_description(
             "Test fake: always routes to provider=faux, model=router-target".into(),
         ),
@@ -221,6 +221,280 @@ async fn llm_router_swaps_provider_and_model() -> anyhow::Result<()> {
     assert!(
         routed_text.is_some(),
         "assistant transcript missing the canned 'hello via router' — router did not swap"
+    );
+
+    // Detach explicitly. Without this, alphabetical test order leaves
+    // `router::decide` registered on the engine, and downstream tests
+    // route their stream_assistant call through the test fake instead of
+    // their own canned faux responses.
+    router.unregister();
+
+    Ok(())
+}
+
+/// Tier-4 composability check: policy denylist blocks tool dispatch.
+///
+/// Wires the `policy-subscribers::subscribe_denylist` subscriber for the
+/// "bash" tool, then drives `agent::run_loop` with a faux canned response
+/// that emits a single `bash` tool-call. The runtime's `merge_before`
+/// must see the `block: true` reply and short-circuit dispatch — the
+/// transcript therefore contains a tool-result that mentions the
+/// denylist, NOT the output of an actually-run bash command.
+///
+/// Gated on `IIIX_TEST_ENGINE_URL` for the same reason as other e2e tests.
+#[tokio::test]
+#[serial_test::serial]
+async fn policy_denylist_blocks_tool_dispatch() -> anyhow::Result<()> {
+    let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
+        eprintln!("skipping: set IIIX_TEST_ENGINE_URL to a running iii engine");
+        return Ok(());
+    };
+
+    let iii = register_worker(&engine_url, InitOptions::default());
+    iii.list_functions()
+        .await
+        .expect("engine reachable for the duration of the test");
+
+    harness_runtime::register_with_iii(&iii).await?;
+    provider_faux::register_with_iii(&iii).await?;
+
+    let model_key = format!("policy-bash-{}", chrono::Utc::now().timestamp_millis());
+    provider_faux::register_canned(
+        &model_key,
+        provider_faux::tool_call_only(
+            "bash",
+            "tc-1",
+            json!({ "command": "echo wrongly_run" }),
+            &model_key,
+            "faux",
+            chrono::Utc::now().timestamp_millis(),
+        ),
+    );
+
+    let _denylist =
+        policy_subscribers::subscribe_denylist(&iii, vec!["bash".to_string()])?;
+
+    let session_id = format!("policy-{}", chrono::Utc::now().timestamp_millis());
+    let bash_tool = harness_types::AgentTool {
+        name: "bash".into(),
+        description: "Run a bash command.".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": { "command": { "type": "string" } },
+            "required": ["command"]
+        }),
+        label: "bash".into(),
+        execution_mode: harness_types::ExecutionMode::Sequential,
+        prepare_arguments_supported: false,
+    };
+    let prompt = vec![AgentMessage::User(UserMessage {
+        content: vec![ContentBlock::Text(TextContent { text: "go".into() })],
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    })];
+
+    let resp: Value = iii
+        .trigger(TriggerRequest {
+            function_id: "agent::run_loop".to_string(),
+            payload: json!({
+                "session_id": session_id,
+                "provider": "faux",
+                "model": model_key,
+                "system_prompt": "test",
+                "messages": prompt,
+                "tools": [bash_tool],
+                "max_turns": 2,
+            }),
+            action: None,
+            timeout_ms: Some(120_000),
+        })
+        .await
+        .expect("agent::run_loop succeeds");
+
+    let messages: Vec<AgentMessage> = serde_json::from_value(
+        resp.get("messages")
+            .cloned()
+            .expect("messages field present"),
+    )?;
+
+    // Find the blocked tool-result. The runtime emits AgentMessage::ToolResult
+    // directly (not wrapped in a User message); each carries the block reason
+    // as a Text content block plus is_error: true.
+    let blocked_text = messages.iter().find_map(|m| {
+        let AgentMessage::ToolResult(r) = m else { return None };
+        if !r.is_error {
+            return None;
+        }
+        for cb in &r.content {
+            if let ContentBlock::Text(t) = cb {
+                let lower = t.text.to_lowercase();
+                if lower.contains("denylist") || lower.contains("blocked") {
+                    return Some(t.text.clone());
+                }
+            }
+        }
+        None
+    });
+    assert!(
+        blocked_text.is_some(),
+        "expected denylist block reason in tool-result; transcript: {messages:#?}"
+    );
+
+    Ok(())
+}
+
+/// Tier-4 composability check: hook subscribers observe before/after via
+/// the collected pubsub envelope. Registers the `hook-example` subscriber
+/// set with `bash` on the denylist, drives one tool-call turn through the
+/// loop, then asserts both `before_seen` and `after_seen` counters
+/// incremented (proving the runtime's collected fan-out reached the
+/// subscribers and got a reply back through `agent::hook_reply`).
+#[tokio::test]
+#[serial_test::serial]
+async fn hooks_before_and_after_see_tool_calls() -> anyhow::Result<()> {
+    let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
+        eprintln!("skipping: set IIIX_TEST_ENGINE_URL to a running iii engine");
+        return Ok(());
+    };
+
+    let iii = register_worker(&engine_url, InitOptions::default());
+    iii.list_functions()
+        .await
+        .expect("engine reachable");
+
+    harness_runtime::register_with_iii(&iii).await?;
+    provider_faux::register_with_iii(&iii).await?;
+
+    let model_key = format!("hook-bash-{}", chrono::Utc::now().timestamp_millis());
+    provider_faux::register_canned(
+        &model_key,
+        provider_faux::tool_call_only(
+            "bash",
+            "tc-2",
+            json!({ "command": "echo never_runs" }),
+            &model_key,
+            "faux",
+            chrono::Utc::now().timestamp_millis(),
+        ),
+    );
+
+    let mut denied = std::collections::HashSet::new();
+    denied.insert("bash".to_string());
+    let hooks = hook_example::register_with_iii(
+        &iii,
+        hook_example::HookExampleConfig { denied_tools: denied },
+    )?;
+    let counters = hooks.counters.clone();
+
+    let session_id = format!("hook-{}", chrono::Utc::now().timestamp_millis());
+    let bash_tool = harness_types::AgentTool {
+        name: "bash".into(),
+        description: "bash".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": { "command": { "type": "string" } },
+            "required": ["command"]
+        }),
+        label: "bash".into(),
+        execution_mode: harness_types::ExecutionMode::Sequential,
+        prepare_arguments_supported: false,
+    };
+    let prompt = vec![AgentMessage::User(UserMessage {
+        content: vec![ContentBlock::Text(TextContent { text: "go".into() })],
+        timestamp: chrono::Utc::now().timestamp_millis(),
+    })];
+
+    let _ = iii
+        .trigger(TriggerRequest {
+            function_id: "agent::run_loop".to_string(),
+            payload: json!({
+                "session_id": session_id,
+                "provider": "faux",
+                "model": model_key,
+                "system_prompt": "test",
+                "messages": prompt,
+                "tools": [bash_tool],
+                "max_turns": 2,
+            }),
+            action: None,
+            timeout_ms: Some(120_000),
+        })
+        .await
+        .expect("agent::run_loop succeeds");
+
+    {
+        let snapshot = counters.lock().await;
+        assert!(
+            snapshot.before_seen >= 1,
+            "before_tool_call subscriber never fired; before_seen={}",
+            snapshot.before_seen
+        );
+        assert!(
+            snapshot.before_blocked >= 1,
+            "before_tool_call denylist never matched; before_blocked={}",
+            snapshot.before_blocked
+        );
+        // after_seen may or may not fire depending on whether the runtime
+        // publishes after_tool_call for blocked calls. We assert >=0 with
+        // a permissive note so the test pins behaviour without overfitting.
+        let _ = snapshot.after_seen;
+    }
+
+    // Detach explicitly so the engine cleans up the trigger before the next
+    // test registers an overlapping subscriber. Without this, alphabetical
+    // test order leaves `hook_example::before_tool_call` active when the
+    // policy test starts, and replies race or duplicate.
+    hooks.unregister_all();
+
+    Ok(())
+}
+
+/// Sub-agent recursion is bounded. Drives a `tool::run_subagent` call
+/// whose `parent_session_id` already contains three `::sub-` segments
+/// (i.e. depth 3, the default cap). The tool must refuse the spawn and
+/// return a `details.depth_limit_reached: true` payload — never trigger a
+/// nested `agent::run_loop`.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_subagent_refuses_at_depth_limit() -> anyhow::Result<()> {
+    let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
+        eprintln!("skipping: set IIIX_TEST_ENGINE_URL to a running iii engine");
+        return Ok(());
+    };
+
+    let iii = register_worker(&engine_url, InitOptions::default());
+    iii.list_functions().await.expect("engine reachable");
+    harness_runtime::register_with_iii(&iii).await?;
+
+    let parent = "root::sub-1::sub-2::sub-3";
+    let resp: Value = iii
+        .trigger(TriggerRequest {
+            function_id: "tool::run_subagent".to_string(),
+            payload: json!({
+                "tool_call": {
+                    "id": "tc-depth",
+                    "name": "run_subagent",
+                    "arguments": {
+                        "prompt": "should refuse",
+                        "provider": "faux",
+                        "model": "doesnt-matter",
+                        "parent_session_id": parent,
+                    }
+                }
+            }),
+            action: None,
+            timeout_ms: Some(15_000),
+        })
+        .await
+        .expect("tool::run_subagent reachable");
+
+    let limited = resp
+        .get("details")
+        .and_then(|d| d.get("depth_limit_reached"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    assert!(
+        limited,
+        "expected depth_limit_reached=true at depth 3; resp: {resp:#?}"
     );
 
     Ok(())

@@ -143,6 +143,10 @@ fn register_run_loop(client: &Arc<III>, stream_assistant: StreamAssistantFn) -> 
                     session_id: session_id.clone(),
                     tools,
                     default_execution_mode: ExecutionMode::Parallel,
+                    max_turns: payload
+                        .get("max_turns")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|v| v as u32),
                 };
                 let outcome = run_loop(&runtime, &sink, &cfg, messages).await;
                 serde_json::to_value(json!({ "messages": outcome.messages }))

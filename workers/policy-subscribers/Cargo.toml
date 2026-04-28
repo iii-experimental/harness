@@ -24,6 +24,7 @@ regex = { workspace = true }
 once_cell = { workspace = true }
 log = "0.4"
 env_logger = "0.11"
+uuid = { version = "1", features = ["v4"] }
 
 [lib]
 name = "policy_subscribers"

@@ -119,6 +119,63 @@ pub fn text_only(text: &str, model: &str, provider: &str, timestamp: i64) -> Can
     }
 }
 
+/// Build a single-tool-call canned response.
+///
+/// The assistant emits one tool-call content block and stops with
+/// `StopReason::Tool`. Used to drive hook/policy e2e tests that need a
+/// deterministic tool invocation. Arguments are passed verbatim as the
+/// `arguments` JSON.
+pub fn tool_call_only(
+    tool_name: &str,
+    tool_call_id: &str,
+    arguments: serde_json::Value,
+    model: &str,
+    provider: &str,
+    timestamp: i64,
+) -> CannedResponse {
+    let final_message = AssistantMessage {
+        content: vec![ContentBlock::ToolCall {
+            id: tool_call_id.to_string(),
+            name: tool_name.to_string(),
+            arguments,
+        }],
+        stop_reason: StopReason::Tool,
+        error_message: None,
+        error_kind: None,
+        usage: None,
+        model: model.to_string(),
+        provider: provider.to_string(),
+        timestamp,
+    };
+    let partial_empty = AssistantMessage {
+        content: Vec::new(),
+        ..final_message.clone()
+    };
+    let events = vec![
+        AssistantMessageEvent::Start {
+            partial: partial_empty.clone(),
+        },
+        AssistantMessageEvent::ToolcallStart {
+            partial: partial_empty,
+        },
+        AssistantMessageEvent::ToolcallEnd {
+            partial: final_message.clone(),
+        },
+        AssistantMessageEvent::Stop {
+            stop_reason: StopReason::Tool,
+            error_message: None,
+            error_kind: None,
+        },
+        AssistantMessageEvent::Done {
+            message: final_message.clone(),
+        },
+    ];
+    CannedResponse {
+        message: final_message,
+        events,
+    }
+}
+
 /// Process-wide [`FauxProvider`] used by [`register_with_iii`]. Tests install
 /// canned responses via [`shared_provider`] before driving the iii function.
 fn shared_provider() -> &'static FauxProvider {

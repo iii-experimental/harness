@@ -265,11 +265,17 @@ impl IiiRuntime {
                 )
                 .await;
             if let Ok(value) = resp {
-                if let Some(items) = value.get("items").and_then(Value::as_array) {
+                // iii v0.11.x stream::list returns a bare array of `data`
+                // payloads; older shapes wrapped them as `{items: [...]}`.
+                // Accept either — see iii-sdk-0.11.3/tests/stream.rs:219.
+                let items = value
+                    .as_array()
+                    .cloned()
+                    .or_else(|| value.get("items").and_then(Value::as_array).cloned());
+                if let Some(items) = items {
                     for item in items.iter().skip(last_index) {
-                        if let Some(d) = item.get("data") {
-                            collected.push(d.clone());
-                        }
+                        let payload = item.get("data").cloned().unwrap_or_else(|| item.clone());
+                        collected.push(payload);
                     }
                     last_index = items.len();
                 }
@@ -554,10 +560,15 @@ fn register_run_loop(iii: &III) {
 
                 let runtime = IiiRuntime::with_session(iii.clone(), provider, model, system_prompt);
                 let sink = IiiSink::new(iii.clone(), session_id.clone());
+                let max_turns = payload
+                    .get("max_turns")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as u32);
                 let cfg = LoopConfig {
                     session_id: session_id.clone(),
                     tools,
                     default_execution_mode: ExecutionMode::Parallel,
+                    max_turns,
                 };
                 let outcome = run_loop(&runtime, &sink, &cfg, std::mem::take(&mut messages)).await;
 
@@ -1068,6 +1079,38 @@ fn register_tool_run_subagent(iii: &III) {
                     .get("parent_session_id")
                     .and_then(Value::as_str)
                     .unwrap_or("root");
+
+                // Bound recursion. Depth is encoded in the session-id chain
+                // (each level appends `::sub-<ts>`); we count occurrences and
+                // refuse the spawn at MAX_SUBAGENT_DEPTH. Mirrors the
+                // depth-3 default from the deepagentsjs reference. Override
+                // via the `max_subagent_depth` arg on the tool call.
+                const DEFAULT_MAX_DEPTH: usize = 3;
+                let max_depth = args
+                    .get("max_subagent_depth")
+                    .and_then(Value::as_u64)
+                    .map_or(DEFAULT_MAX_DEPTH, |v| v as usize);
+                let current_depth = parent_session.matches("::sub-").count();
+                if current_depth >= max_depth {
+                    let err = format!(
+                        "sub-agent depth limit reached ({current_depth}/{max_depth}); refusing spawn from {parent_session}"
+                    );
+                    let result = ToolResult {
+                        content: vec![ContentBlock::Text(TextContent { text: err.clone() })],
+                        details: json!({
+                            "via": "tool::run_subagent",
+                            "depth_limit_reached": true,
+                            "depth": current_depth,
+                            "max_depth": max_depth,
+                            "parent_session_id": parent_session,
+                            "error": err,
+                        }),
+                        terminate: false,
+                    };
+                    return serde_json::to_value(result)
+                        .map_err(|e| IIIError::Handler(e.to_string()));
+                }
+
                 let child_session_id =
                     format!("{parent_session}::sub-{}", chrono::Utc::now().timestamp_millis());
 
@@ -1455,5 +1498,17 @@ mod tests {
         let a = error_assistant("boom");
         assert_eq!(a.error_message.as_deref(), Some("boom"));
         assert!(matches!(a.stop_reason, StopReason::Error));
+    }
+
+    #[test]
+    fn subagent_depth_count_matches_chain() {
+        // Depth = number of "::sub-" segments in the parent session id.
+        // Mirrors the recursion-bound logic inside register_tool_run_subagent.
+        assert_eq!("root".matches("::sub-").count(), 0);
+        assert_eq!("root::sub-1".matches("::sub-").count(), 1);
+        assert_eq!("root::sub-1::sub-2".matches("::sub-").count(), 2);
+        assert_eq!("root::sub-1::sub-2::sub-3".matches("::sub-").count(), 3);
+        // A session id without our chain prefix counts as depth 0.
+        assert_eq!("free-form-id".matches("::sub-").count(), 0);
     }
 }

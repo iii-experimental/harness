@@ -201,12 +201,17 @@ async fn write_hook_reply(iii: &III, stream_name: &str, event_id: &str, reply: &
     if event_id.is_empty() || stream_name.is_empty() {
         return;
     }
+    // `item_id` is required by iii v0.11.x stream::set; the engine drops or
+    // de-dupes writes that don't carry it, which silently broke the
+    // collected pubsub reply path before harness v0.11.6.
+    let item_id = uuid::Uuid::new_v4().to_string();
     let _ = iii
         .trigger(TriggerRequest {
             function_id: "stream::set".into(),
             payload: json!({
                 "stream_name": stream_name,
                 "group_id": event_id,
+                "item_id": item_id,
                 "data": reply,
             }),
             action: None,

@@ -6,7 +6,7 @@
 
 use harness_types::{
     AgentEvent, AgentMessage, AgentTool, AssistantMessage, ContentBlock, ExecutionMode, StopReason,
-    ToolCall, ToolResult, ToolResultMessage,
+    TextContent, ToolCall, ToolResult, ToolResultMessage,
 };
 
 use crate::runtime::{BatchOutcome, EventSink, LoopRuntime};
@@ -17,6 +17,11 @@ pub struct LoopConfig {
     pub session_id: String,
     pub tools: Vec<AgentTool>,
     pub default_execution_mode: ExecutionMode,
+    /// Hard cap on assistant turns (one stream_assistant call = one turn).
+    /// `None` means unbounded; the caller is expected to cap with the
+    /// trigger-level timeout. Most users want a finite cap so a provider
+    /// that loops on tool-calls can't burn the budget. Default: 32.
+    pub max_turns: Option<u32>,
 }
 
 impl LoopConfig {
@@ -25,6 +30,7 @@ impl LoopConfig {
             session_id: session_id.into(),
             tools: Vec::new(),
             default_execution_mode: ExecutionMode::Parallel,
+            max_turns: Some(32),
         }
     }
 }
@@ -74,11 +80,50 @@ pub async fn run_loop<R: LoopRuntime + ?Sized, S: EventSink + ?Sized>(
     }
 
     let mut pending: Vec<AgentMessage> = runtime.drain_steering(&config.session_id).await;
+    let mut turns_taken: u32 = 0;
 
     'outer: loop {
         let mut has_more_tool_calls = true;
 
         while has_more_tool_calls || !pending.is_empty() {
+            if let Some(cap) = config.max_turns {
+                if turns_taken >= cap {
+                    // Budget exhausted. Emit a synthetic assistant turn so
+                    // callers see a clean termination instead of the loop
+                    // appearing to hang on the trigger timeout.
+                    let exhausted = AssistantMessage {
+                        content: vec![ContentBlock::Text(TextContent {
+                            text: format!(
+                                "loop stopped: max_turns ({cap}) reached"
+                            ),
+                        })],
+                        stop_reason: StopReason::End,
+                        error_message: None,
+                        error_kind: None,
+                        usage: None,
+                        model: String::new(),
+                        provider: String::new(),
+                        timestamp: chrono::Utc::now().timestamp_millis(),
+                    };
+                    let exhausted_msg = AgentMessage::Assistant(exhausted.clone());
+                    sink.emit(AgentEvent::MessageStart {
+                        message: exhausted_msg.clone(),
+                    })
+                    .await;
+                    sink.emit(AgentEvent::MessageEnd {
+                        message: exhausted_msg.clone(),
+                    })
+                    .await;
+                    messages.push(exhausted_msg.clone());
+                    sink.emit(AgentEvent::TurnEnd {
+                        message: exhausted_msg,
+                        tool_results: Vec::new(),
+                    })
+                    .await;
+                    break 'outer;
+                }
+            }
+            turns_taken += 1;
             sink.emit(AgentEvent::TurnStart).await;
 
             for m in std::mem::take(&mut pending) {
@@ -373,6 +418,7 @@ mod tests {
                 prepare_arguments_supported: false,
             }],
             default_execution_mode: ExecutionMode::Parallel,
+            max_turns: None,
         };
 
         let outcome = run_loop(&rt, &*captured, &cfg, vec![user("call echo")]).await;

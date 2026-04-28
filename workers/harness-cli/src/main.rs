@@ -28,6 +28,20 @@ const DEFAULT_PROVIDER: &str = "anthropic";
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a coding assistant running on the iii harness. Use the tools provided to inspect and modify files. Keep responses focused and concrete.";
 const DEFAULT_ENGINE_URL: &str = "ws://127.0.0.1:49134";
 
+/// Providers whose endpoint URL has not been verified against the upstream
+/// docs. They compile + register, but real inference may fail until the
+/// endpoint is confirmed. Gated behind `--experimental-providers` so first-
+/// time users don't pick a broken option by accident.
+const EXPERIMENTAL_PROVIDERS: &[&str] = &[
+    "opencode-go",
+    "minimax",
+    "huggingface",
+    "opencode-zen",
+    "zai",
+    "vercel-ai-gateway",
+    "kimi-coding",
+];
+
 #[derive(Debug, Clone)]
 struct CliArgs {
     prompt: String,
@@ -35,6 +49,7 @@ struct CliArgs {
     model: Option<String>,
     max_turns: usize,
     engine_url: String,
+    experimental_providers: bool,
 }
 
 fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
@@ -43,6 +58,7 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
     let mut model: Option<String> = None;
     let mut max_turns = 10usize;
     let mut engine_url = DEFAULT_ENGINE_URL.to_string();
+    let mut experimental_providers = false;
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -75,6 +91,10 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
                     .ok_or_else(|| anyhow::anyhow!("--engine-url requires a value"))?;
                 i += 2;
             }
+            "--experimental-providers" => {
+                experimental_providers = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -100,6 +120,7 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
         model,
         max_turns,
         engine_url,
+        experimental_providers,
     })
 }
 
@@ -120,6 +141,9 @@ fn print_help() {
     println!("  --model <id>           provider model id (default depends on --provider)");
     println!("  --max-turns <n>        stop after n turns (default: 10)");
     println!("  --engine-url <url>     iii-engine WebSocket URL (default: {DEFAULT_ENGINE_URL})");
+    println!("  --experimental-providers");
+    println!("                          opt in to providers whose endpoint is unverified:");
+    println!("                          {}", EXPERIMENTAL_PROVIDERS.join(", "));
     println!();
     println!("tool::bash discovery:");
     println!("  the engine's iii-sandbox worker is detected at runtime via");
@@ -131,6 +155,13 @@ fn print_help() {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = parse_args()?;
+    if EXPERIMENTAL_PROVIDERS.contains(&args.provider.as_str()) && !args.experimental_providers {
+        anyhow::bail!(
+            "provider '{}' is experimental — its upstream endpoint is unverified and real \
+             inference may fail. Re-run with --experimental-providers to opt in.",
+            args.provider
+        );
+    }
     let model = resolve_model(&args)?;
 
     let iii = connect_iii(&args.engine_url).await?;

@@ -56,7 +56,8 @@ iii worker add llm-router
 # → When present, harness extracts the last user prompt + routing hints,
 #   calls router::decide (RoutingRequest -> RoutingDecision), and dispatches
 #   to the routed provider/model. Provider derivation: response.provider
-#   field if present, else split on '/' for namespaced model ids.
+#   field if present (iii-hq/workers#57), else split on '/' for namespaced
+#   model ids, else fall back to the caller's hint.
 # → When llm-router isn't on the bus, harness dispatches directly. No flag.
 
 # Tier 4 — policy enforcement

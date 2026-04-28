@@ -1,0 +1,60 @@
+[package]
+name = "harnessd"
+description = "All-in-one binary that connects to an iii engine and registers every harness worker on the bus in one process. Replaces the chain of cargo run -p ... calls a user has to make for a full demo."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "harnessd"
+path = "src/main.rs"
+
+[dependencies]
+harness-runtime = { path = "../harness-runtime" }
+session-tree = { path = "../session-tree" }
+context-compaction = { path = "../context-compaction" }
+session-corpus = { path = "../session-corpus" }
+document-extract = { path = "../document-extract" }
+hook-example = { path = "../hook-example" }
+auth-storage = { path = "../auth-storage" }
+models-catalog = { path = "../models-catalog" }
+
+provider-anthropic = { path = "../provider-anthropic" }
+provider-openai = { path = "../provider-openai" }
+provider-openai-responses = { path = "../provider-openai-responses" }
+provider-google = { path = "../provider-google" }
+provider-google-vertex = { path = "../provider-google-vertex" }
+provider-azure-openai = { path = "../provider-azure-openai" }
+provider-bedrock = { path = "../provider-bedrock" }
+provider-openrouter = { path = "../provider-openrouter" }
+provider-groq = { path = "../provider-groq" }
+provider-cerebras = { path = "../provider-cerebras" }
+provider-xai = { path = "../provider-xai" }
+provider-deepseek = { path = "../provider-deepseek" }
+provider-mistral = { path = "../provider-mistral" }
+provider-fireworks = { path = "../provider-fireworks" }
+provider-kimi-coding = { path = "../provider-kimi-coding" }
+provider-minimax = { path = "../provider-minimax" }
+provider-zai = { path = "../provider-zai" }
+provider-huggingface = { path = "../provider-huggingface" }
+provider-vercel-ai-gateway = { path = "../provider-vercel-ai-gateway" }
+provider-opencode-zen = { path = "../provider-opencode-zen" }
+provider-opencode-go = { path = "../provider-opencode-go" }
+provider-faux = { path = "../provider-faux" }
+
+oauth-anthropic = { path = "../oauth-anthropic" }
+oauth-openai-codex = { path = "../oauth-openai-codex" }
+oauth-github-copilot = { path = "../oauth-github-copilot" }
+oauth-google-gemini-cli = { path = "../oauth-google-gemini-cli" }
+oauth-google-antigravity = { path = "../oauth-google-antigravity" }
+
+iii-sdk = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+log = "0.4"
+env_logger = "0.11"

@@ -358,10 +358,10 @@ pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<OAuthFuncti
         |_payload: Value| async move {
             let callbacks = OAuthLoginCallbacks {
                 on_open_url: Box::new(|url| {
-                    log::info!("oauth::google-gemini-cli::login open URL: {url}")
+                    log::info!("oauth::google-gemini-cli::login open URL: {url}");
                 }),
                 on_progress: Box::new(|msg| {
-                    log::info!("oauth::google-gemini-cli::login progress: {msg}")
+                    log::info!("oauth::google-gemini-cli::login progress: {msg}");
                 }),
             };
             let cred = login(callbacks)

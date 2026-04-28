@@ -44,6 +44,7 @@ members = [
     "workers/session-corpus",
     "workers/document-extract",
     "workers/harness-cli",
+    "workers/harnessd",
 ]
 
 [workspace.package]

@@ -327,8 +327,12 @@ pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<OAuthFuncti
             .with_description("Run the PKCE flow and return a fresh credential.".into()),
         |_payload: Value| async move {
             let callbacks = OAuthLoginCallbacks {
-                on_open_url: Box::new(|url| log::info!("oauth::anthropic::login open URL: {url}")),
-                on_progress: Box::new(|msg| log::info!("oauth::anthropic::login progress: {msg}")),
+                on_open_url: Box::new(|url| {
+                    log::info!("oauth::anthropic::login open URL: {url}");
+                }),
+                on_progress: Box::new(|msg| {
+                    log::info!("oauth::anthropic::login progress: {msg}");
+                }),
             };
             let cred = login(callbacks)
                 .await

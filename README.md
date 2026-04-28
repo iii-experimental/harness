@@ -1,32 +1,72 @@
 # harness
 
-Single-agent loop runtime on [iii-engine](https://iii.dev).
+Single-agent loop runtime on [iii-engine](https://iii.dev). 44 narrow workers, all iii-first.
 
-10 loop functions, 11 stream-event variants, 3 hook topics, 2 message-pull points. Tools register as iii functions. Hooks are independent subscribers on `agent::before_tool_call`, `agent::after_tool_call`, and `agent::transform_context`. Sessions, compaction, redaction, and document extraction self-register on the bus.
+The agent loop is a state machine. Every concern outside the state machine is a worker on the iii bus. Both reference binaries (`harness-cli`, `harness-tui`) are thin invokers — they connect to a running iii engine, register the runtime + a provider, trigger `agent::run_loop`, and consume the per-session events stream.
 
 > Status: 0.11.0, 0.x experimental. API surface unstable until production-proven.
 
+## Architecture
+
+```
+                                                    +---------------------------+
+                                                    |       iii engine          |
+                                                    |   (ws://localhost:49134)  |
+                                                    +-------------+-------------+
+                                                                  |
+                                                                  | trigger/publish/subscribe
+              +---------------+         +-----------------+       |       +----------------------+
+              |  harness-cli  |---+     |  harness-tui    |---+   |   +---|  policy-denylist     |
+              |   (thin)      |   |     |   (ratatui)     |   |   |   |   |  audit-log           |
+              +-------+-------+   |     +--------+--------+   |   |   |   |  dlp-scrubber        |
+                      |           |              |            |   |   |   |  hook-example        |
+                      | trigger   |   subscribe  |   trigger  |   |   |   +----------+-----------+
+                      | run_loop  |   events     |   run_loop |   |   |              | subscribe
+                      v           |              v            |   v   v              v
+        +-------------+-----------+--------------+------------+---+---+--+
+        |                          iii bus                                |
+        +---+--------+--------+--------+--------+--------+--------+-------+
+            |        |        |        |        |        |        |
+            v        v        v        v        v        v        v
+     +-------+ +-------+ +-------+ +-------+ +-------+ +-------+ +-------+
+     |runtime| |provider| |oauth | |session| |compact| |corpus | |models |
+     |worker | | x22    | | x5   | | tree  | | -ion  | |       | |catalog|
+     +-------+ +-------+ +-------+ +-------+ +-------+ +-------+ +-------+
+       12 agent::*    provider::    oauth::*  session::  subscriber  corpus::  models::
+       8 tool::*      <name>::      login/    fork/      on agent::  scan/     list/
+       4 HTTP         stream_       refresh/  clone/     events ->   redact/   get/
+       triggers       assistant     status    compact/   transform_  review/   supports
+                                              tree/      context     publish
+                                              export_html
+                                              create/append/messages
+
+                          +-----------------+        +----------------+
+                          |  iii-sandbox    |        |  document-     |
+                          |  (auto-route    |        |  extract       |
+                          |   bash)         |        |                |
+                          +-----------------+        +----------------+
+                                  ^                          ^
+                                  | tool::bash discovers     | document::extract
+                                  +--------------------------+
+
+       Streams the runtime publishes:
+         agent::events/<sid>        11 AgentEvent variants
+         agent::hook_reply/<eid>    collected-pubsub replies
+
+       Pubsub topics the runtime publishes on:
+         agent::before_tool_call    collect, first-block-wins
+         agent::after_tool_call     collect, field-by-field merge
+         agent::transform_context   collect, last-reply-wins
+
+       State (scope `agent`):
+         session/<id>/steering | followup | abort_signal
+```
+
 ## Why
 
-Modern agent harnesses bundle the loop, the tool sandbox, the provider clients, the session storage, and the UI into a single process. Works at small scale, fails at ecosystem scale: tools have to live in the harness's language, hooks are limited to one process, sub-agents become subprocess shells, sessions are local files.
+Modern agent harnesses bundle the loop, the tool sandbox, the provider clients, the session storage, and the UI into one process. Works at small scale, fails at ecosystem scale: tools have to live in the harness's language, hooks are limited to one process, sub-agents become subprocess shells, sessions are local files.
 
-`harness` keeps the loop and nothing else. Every other concern is a worker on the iii bus:
-
-- Provider streaming → 22 `provider-*` workers (`provider::<name>::stream_assistant`)
-- OAuth subscription auth → 5 `oauth-*` workers (`oauth::<name>::{login,refresh,status}`)
-- Credential vault → `auth-storage` (`auth::{get,set,delete}_token`, `auth::list_providers`, `auth::status`)
-- Models catalog → `models-catalog` (`models::{list,get,supports}`)
-- Sessions + forks + HTML export + persistent transcripts → `session-tree` (8 iii functions: `session::fork`, `session::clone`, `session::compact`, `session::tree`, `session::export_html`, `session::create`, `session::append`, `session::messages`). When registered, `agent::run_loop` automatically hydrates from the existing transcript on entry and persists every new turn on exit.
-- Auto-compaction on overflow → `context-compaction` subscribes to `agent::events`, republishes overflow signals to `agent::transform_context`
-- Session corpus / redact / publish → `session-corpus` (4 iii functions: `corpus::scan`, `corpus::redact`, `corpus::review`, `corpus::publish`)
-- Document text extraction (PDF, DOCX) → `document-extract` (`document::extract`)
-- Sub-agents → `tool::run_subagent` invokes `agent::run_loop` recursively with a child session id
-- All-in-one bundle → `harnessd serve` registers everything in one process
-- Hook subscribers → any worker can `subscribe` on the three hook topics; see `hook-example` for a reference impl
-- Sandbox isolation → existing iii-sandbox worker (auto-discovered by `tool::bash`)
-- MCP / A2A bridges → existing iii workers
-
-Loop in Rust. Tools in any language. Hot-add capabilities at runtime. One trace through everything.
+`harness` keeps the loop and nothing else. Every other concern is a worker on the iii bus.
 
 ## Closed vocabulary
 
@@ -46,89 +86,47 @@ The loop adds:
 
 That is the entire vocabulary. Implementation details (auth, models, providers, storage, hooks) are workers consumed through iii functions or pubsub topics.
 
-## Workspace layout
-
-43 narrow workers under `workers/`:
-
-- `harness-types`, `harness-runtime` — loop, types, run_loop, built-in tools
-- `harness-cli` — reference CLI binary
-- `harness-tui` — ratatui interactive TUI binary
-- `harness-runtime::register_with_iii` — registers the 12 `agent::*` functions, 7 `tool::*` functions, and 4 HTTP triggers; `tool::bash` runtime-discovers `sandbox::exec`
-- `harness-iii-bridge` — older bridge crate retained for downstream consumers; new wiring lives in `harness-runtime`
-- `provider-base` — shared HTTP/SSE/error infra; OpenAI Chat Completions generic client
-- `provider-anthropic`, `provider-openai`, `provider-openai-responses`, `provider-google`, `provider-google-vertex`, `provider-azure-openai`, `provider-bedrock`, `provider-openrouter`, `provider-groq`, `provider-cerebras`, `provider-xai`, `provider-deepseek`, `provider-mistral`, `provider-fireworks`, `provider-kimi-coding`, `provider-minimax`, `provider-zai`, `provider-huggingface`, `provider-vercel-ai-gateway`, `provider-opencode-zen`, `provider-opencode-go`, `provider-faux`
-- `oauth-anthropic`, `oauth-openai-codex`, `oauth-github-copilot`, `oauth-google-gemini-cli`, `oauth-google-antigravity` — PKCE + device-code flows for subscription auth
-- `auth-storage` — credential persistence
-- `session-tree` — exposes `register_with_iii(iii, store)` to publish 5 `session::*` iii functions
-- `context-compaction` — exposes `register_with_iii(iii)` that subscribes to `agent::events` and republishes overflow signals
-- `session-corpus` — exposes `register_with_iii(iii, reviewer)` to publish 4 `corpus::*` iii functions
-- `document-extract` — exposes `register_with_iii(iii)` to publish the `document::extract` function
-- `hook-example` — live subscriber binary across all 3 hook topics; reference for custom hook authors
-- `models-catalog` — model registry
-- `overflow-classify` — provider context-overflow detector (20 patterns)
-- `replay-test`, `fixtures-gen` — test + dev helpers
-
 ## Quick start
 
 ```bash
 # 1. Boot an iii engine on the default port
-iii engine
+iii --use-default-config &
 
-# 2. Build the harness binaries
-cargo build --release --bin harness --bin hook-example
+# 2. Build the binaries
+cargo build --release --bin harness --bin harness-tui --bin harnessd
 
-# 3. (Optional) Add the iii-sandbox worker so the agent's bash tool runs in a microVM
+# 3. (Optional) Add the iii-sandbox worker — bash auto-routes through the microVM
 iii worker add sandbox
 
-# 4. Run the agent against a real LLM
-export ANTHROPIC_API_KEY=sk-ant-...
-./target/release/harness "open README.md, summarise it in three sentences, then list every workspace crate using ls."
+# 4. (Optional) Run the all-in-one daemon to register every harness worker
+./target/release/harnessd serve --providers all &
 
-# 5. (Optional) In a second shell: live-watch hook traffic
-III_URL=ws://localhost:49134 ./target/release/hook-example
+# 5. Run the agent
+export ANTHROPIC_API_KEY=sk-ant-...
+./target/release/harness "open README.md, summarise it in three sentences."
 ```
 
-When the iii-sandbox worker is registered, the harness's `bash` tool routes through the sandbox automatically — same tool surface, host filesystem isolated.
+When the iii-sandbox worker is registered, the harness's `bash` tool routes through the sandbox automatically — same surface, host filesystem isolated. No flag.
 
-## End-to-end demo (real LLM)
+## CLI
 
 ```bash
-# build
-cargo build --release --bin harness
-
 # anthropic (default)
 export ANTHROPIC_API_KEY=sk-ant-...
-./target/release/harness "open README.md, summarise it in three sentences, then list every workspace crate using ls."
+./target/release/harness "list every workspace crate using ls."
 
 # pick provider + model
 ./target/release/harness --provider openai --model gpt-4o "say hi"
 ./target/release/harness --provider groq --model llama-3.3-70b-versatile "say hi"
-
-# add the iii-sandbox worker so bash runs in a microVM (auto-discovered, no flag)
-iii worker add sandbox
-./target/release/harness "run uname -a"
 ```
 
 Built-in tools the agent can call:
 - `read`, `write`, `edit` — file ops with diff-style replace
 - `ls`, `find`, `grep` — directory walks and substring search
 - `bash` — `bash -lc` on host, or routed through `iii-sandbox::exec` when the sandbox worker is registered
+- `run_subagent` — spawn a focused sub-agent for a subtask, returns its final answer
 
 CLI prints AgentEvents as they stream so you can watch the agent reason, call tools, iterate.
-
-## Hooks
-
-Three pubsub topics. Subscribers are independent workers; the loop fans out and merges responses.
-
-- `agent::before_tool_call` — payload: `{ tool_call }`. Subscribers may return `{ block: bool, reason: str }`.
-- `agent::after_tool_call` — payload: `{ tool_call, result }`. Subscribers may return a modified `result`.
-- `agent::transform_context` — payload: `{ messages }`. Subscribers may return rewritten `messages`.
-
-Add a custom hook by registering an iii function and binding a `subscribe` trigger to one of the three topics. See `workers/hook-example/src/lib.rs` for a working pattern. Run the binary to log live traffic:
-
-```bash
-HOOK_EXAMPLE_DENY=dangerous,rm cargo run --release -p hook-example
-```
 
 ## TUI
 
@@ -137,24 +135,175 @@ cargo build --release --bin harness-tui
 ./target/release/harness-tui --provider anthropic --model claude-sonnet-4-6
 ```
 
-Like `harness-cli`, the TUI is a thin invoker: it connects to a running iii engine, registers `harness-runtime` + the configured provider, triggers `agent::run_loop`, and renders the `agent::events/<sid>` stream. Override the engine URL with `HARNESS_ENGINE_URL`.
+ratatui interactive UI. Same iii-bus shape as the CLI: connects to engine, registers runtime + provider, triggers `agent::run_loop`, renders the events stream.
 
-ratatui interactive UI:
-- Multi-line editor with slash commands, `@file` fuzzy attachment, inline bash
-- Markdown render with collapsible tool/thinking blocks, queue + spinner indicator
+- Multi-line editor with slash commands, `@file` fuzzy attachment, inline `!bash`
+- Markdown render with collapsible tool / thinking blocks, queue + spinner indicator
 - Native Kitty / iTerm2 inline image render via terminal escape protocols (placeholder fallback elsewhere)
 - Clipboard image paste
-- `/tree` overlay with parent/child branching glyphs (`├─` `└─` `│`), search, filter, bookmarks
+- `/tree` overlay with parent / child branching glyphs (`├─` `└─` `│`), search, filter, bookmarks
 - `/hotkeys` overlay listing every binding
-- Themes (dark, light, user-supplied TOML at `~/.harness/themes/<name>.toml`)
+- Themes (`dark`, `light`, user-supplied TOML at `~/.harness/themes/<name>.toml`)
 - Keybinding overrides at `~/.harness/keybindings.json`
 - Hot-reload via `notify` watcher: edit theme or keybindings file, TUI picks up the change live
+- `HARNESS_ENGINE_URL` env var overrides the engine URL
+
+## harnessd (all-in-one bundle)
+
+```bash
+./target/release/harnessd serve --providers all [--with-hook-example]
+./target/release/harnessd status
+```
+
+Single binary that registers every harness worker on the bus in one process — runtime, 22 providers, 5 oauth flows, auth-storage, models-catalog, sessions, corpus, extract, compaction. Replaces the chain of `cargo run -p ...` calls.
+
+## Functions registered on the bus
+
+### `agent::*` (12)
+| Function | Purpose |
+|---|---|
+| `agent::run_loop` | Orchestrator. Drives the inner state machine. Persists transcripts to `session-tree` when registered. |
+| `agent::stream_assistant` | Provider router. Calls `provider::<name>::stream_assistant` based on payload. |
+| `agent::prepare_tool` | Validate args, fan out `before_tool_call` via `publish_collect`. |
+| `agent::execute_tool` | Resolve `tool::<name>` and dispatch via `iii.trigger`. |
+| `agent::finalize_tool` | Fan out `after_tool_call` via `publish_collect`, merge replies. |
+| `agent::transform_context` | Fan out `transform_context` via `publish_collect`, decode last reply. |
+| `agent::convert_to_llm` | `AgentMessage[]` → provider wire shape. Pass-through default. |
+| `agent::get_steering` | Drain mid-run injection queue. |
+| `agent::get_followup` | Drain post-stop continuation queue. |
+| `agent::abort` | Set abort signal in iii state. |
+| `agent::push_steering` | HTTP-callable enqueue helper. |
+| `agent::push_followup` | HTTP-callable enqueue helper. |
+
+### `tool::*` (8)
+`tool::read`, `tool::write`, `tool::edit`, `tool::ls`, `tool::grep`, `tool::find`, `tool::bash`, `tool::run_subagent`. `tool::bash` runtime-discovers `sandbox::exec`.
+
+### `provider::<name>::stream_assistant` (22)
+Each provider crate self-registers via `register_with_iii(iii)`:
+
+```
+anthropic, openai, openai-responses, google, google-vertex, azure-openai,
+bedrock, openrouter, groq, cerebras, xai, deepseek, mistral, fireworks,
+kimi-coding, minimax, zai, huggingface, vercel-ai-gateway, opencode-zen,
+opencode-go, faux
+```
+
+### `oauth::<name>::{login, refresh, status}` (5)
+PKCE / device-code flows registered by:
+
+```
+oauth-anthropic, oauth-openai-codex, oauth-github-copilot,
+oauth-google-gemini-cli, oauth-google-antigravity
+```
+
+### `session::*` (8)
+- `session::create`, `session::append`, `session::messages` — persistent transcripts
+- `session::fork`, `session::clone` — branch off existing sessions
+- `session::compact` — append a Compaction entry summarising the active path
+- `session::tree` — return the tree-shape
+- `session::export_html` — render the active path as a self-contained HTML doc
+
+When `session-tree` is registered, `agent::run_loop` automatically hydrates from the existing transcript on entry and persists every new turn on exit.
+
+### `auth::*` (5)
+- `auth::get_token`, `auth::set_token`, `auth::delete_token` — credential vault
+- `auth::list_providers`, `auth::status`
+
+### `models::*` (3)
+- `models::list`, `models::get`, `models::supports` — model capability catalog
+
+### `corpus::*` (4)
+- `corpus::scan`, `corpus::redact`, `corpus::review`, `corpus::publish` — session corpus pipeline
+
+### `document::extract` (1)
+PDF + DOCX text extraction.
+
+### `policy::*` (3, opt-in via `policy-subscribers` binaries)
+- `policy::denylist` — block tool calls by name
+- `policy::audit_log` — JSONL append of every call
+- `policy::dlp_scrubber` — redact AWS / OpenAI / GitHub / Stripe / Google secret shapes
+
+## Hooks
+
+Three pubsub topics. Subscribers are independent workers; the loop fans out via `publish_collect` (write event with `event_id` to topic, poll `agent::hook_reply/<event_id>` for replies, merge).
+
+| Topic | Subscriber reply shape | Merge rule |
+|---|---|---|
+| `agent::before_tool_call` | `{ block: bool, reason: str }` | first-blocker-wins |
+| `agent::after_tool_call` | partial `ToolResult` (`content`, `details`, `terminate`) | field-by-field |
+| `agent::transform_context` | `{ messages: [...] }` or bare `[...]` | last reply wins |
+
+Add a custom hook by registering an iii function and binding a `subscribe` trigger. See `workers/hook-example/src/lib.rs` for the minimal pattern and `workers/policy-subscribers/src/lib.rs` for production-shape examples.
+
+```bash
+# Reference subscribers — pick one or all
+HOOK_EXAMPLE_DENY=dangerous,rm cargo run --release -p hook-example
+cargo run --release --bin policy-denylist -- --deny "bash:rm -rf,sudo"
+cargo run --release --bin audit-log     -- --log ~/.harness/audit.jsonl
+cargo run --release --bin dlp-scrubber
+```
+
+## Worker inventory (44 crates)
+
+```
+workers/
+├── harness-types/             # closed type vocabulary
+├── harness-runtime/           # loop + 8 tools + collected pubsub + hook merge
+├── harness-cli/               # thin iii-bus CLI binary
+├── harness-tui/               # thin iii-bus TUI binary (ratatui)
+├── harness-iii-bridge/        # legacy bridge crate (most code lives in harness-runtime now)
+├── harnessd/                  # all-in-one daemon registering every worker
+├── provider-base/             # shared HTTP/SSE/error infra + provider register helper
+├── provider-{anthropic, openai, openai-responses, google, google-vertex,
+│             azure-openai, bedrock, openrouter, groq, cerebras, xai,
+│             deepseek, mistral, fireworks, kimi-coding, minimax, zai,
+│             huggingface, vercel-ai-gateway, opencode-zen, opencode-go,
+│             faux}/            # 22 provider workers
+├── oauth-{anthropic, openai-codex, github-copilot,
+│         google-gemini-cli, google-antigravity}/  # 5 oauth flows
+├── auth-storage/              # credential vault
+├── models-catalog/            # model capability database
+├── session-tree/              # 8 session::* fns inc. persistent transcripts
+├── context-compaction/        # subscriber on agent::events
+├── session-corpus/            # corpus::* pipeline
+├── document-extract/          # PDF / DOCX text extraction
+├── overflow-classify/         # 20-pattern provider context-overflow detector
+├── hook-example/              # reference live subscriber across the 3 hook topics
+├── policy-subscribers/        # production-shape denylist + audit + DLP subscribers
+├── replay-test/               # replay agent-session fixtures + e2e gated test
+└── fixtures-gen/              # dev helper for generating golden fixtures
+```
+
+## Collected pubsub contract
+
+`iii-sdk` 0.11 has no native `publish_collect`. The runtime workaround:
+
+1. `IiiRuntime::publish_collect` mints `event_id` (uuid v4).
+2. Publishes `{ event_id, reply_stream: "agent::hook_reply", payload: {...} }` to the topic.
+3. Subscribers receive the envelope, do their work, write reply via `stream::set` on `(stream_name="agent::hook_reply", group_id=event_id)`.
+4. Runtime polls `stream::list` until `timeout_ms` (default 5000), collects every reply.
+5. `harness_runtime::hooks` (`merge_before` / `merge_after` / `decode_transform`) composes the final outcome.
+
+When iii-sdk grows native `publish_collect`, the polling falls away — the merge logic stays.
+
+## Testing
+
+```bash
+# Unit + integration tests (skips live e2e)
+cargo test --workspace
+
+# Live end-to-end against a running iii engine
+iii --use-default-config &
+IIIX_TEST_ENGINE_URL=ws://127.0.0.1:49134 cargo test -p replay-test --test end_to_end
+```
+
+The e2e test registers `harness-runtime` + `provider-faux`, drives `agent::run_loop` against a canned response, asserts the transcript is non-error with at least one assistant message.
 
 ## Status
 
-Apache-2.0. v0.11.0 — `policy-subscribers` reference workers (denylist, audit log, DLP scrubber), refreshed `ARCHITECTURE.md`, end-to-end test verified live against an iii engine. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.11.0). Remaining SDK gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
+Apache-2.0. v0.11.0 — `policy-subscribers` reference workers + refreshed `ARCHITECTURE.md` + verified live e2e. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.11.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`. Remaining iii-sdk gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
 
-Both `harness-cli` and `harness-tui` are iii-first thin invokers as of v0.8.
+Both `harness-cli` and `harness-tui` are iii-first thin invokers as of v0.8. Hook subscribers can block tool calls, modify tool results, and rewrite context as of v0.10.
 
 ## Contributing
 
@@ -163,7 +312,7 @@ Both `harness-cli` and `harness-tui` are iii-first thin invokers as of v0.8.
 - Provider names (Anthropic, OpenAI, Google, etc.) are APIs we authenticate against and may be referenced
 - No emojis in any committed text
 - Commit per concern, not per file
-- No Cargo.lock in workspace root (library workspace)
+- No `Cargo.lock` in workspace root (library workspace)
 
 ## License
 

@@ -119,6 +119,7 @@ pub async fn register_with_iii(iii: &III) -> anyhow::Result<()> {
         Arc::new(FindTool),
     );
     register_tool_bash(iii);
+    register_tool_run_subagent(iii);
 
     register_http(iii, "agent/prompt", "agent::run_loop")?;
     register_http(iii, "agent/{session_id}/steer", "agent::push_steering")?;
@@ -703,6 +704,144 @@ fn register_tool_simple(
             async move {
                 let tool_call = decode_tool_call(&payload)?;
                 let result = handler.execute(&tool_call).await;
+                serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
+            }
+        },
+    ));
+}
+
+/// Register `tool::run_subagent` — a tool that triggers a nested
+/// `agent::run_loop` with a child session id and returns the child's final
+/// assistant text. The agent advertises this tool whenever the sub-agent
+/// pattern is wanted; the LLM picks it up like any other tool.
+///
+/// Tool args:
+/// - `prompt` (string, required) — the focused subtask the sub-agent should answer
+/// - `provider` (string, required) — provider name registered on the bus
+/// - `model` (string, required) — model id passed through to the provider
+/// - `system_prompt` (string, optional) — defaults to a small "be concise" prompt
+/// - `max_turns` (u32, optional) — overrides the parent's max-turns budget
+///
+/// Returns: a `ToolResult` with the final assistant text and a `details`
+/// payload `{ child_session_id, turns, stop_reason }`.
+fn register_tool_run_subagent(iii: &III) {
+    let iii_for_handler = iii.clone();
+    iii.register_function((
+        RegisterFunctionMessage::with_id("tool::run_subagent".to_string()).with_description(
+            "Spawn a sub-agent for a focused subtask. Returns the sub-agent's final answer."
+                .to_string(),
+        ),
+        move |payload: Value| {
+            let iii = iii_for_handler.clone();
+            async move {
+                let tool_call = decode_tool_call(&payload)?;
+                let args = &tool_call.arguments;
+                let prompt = args
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required arg: prompt".into()))?;
+                let provider = args
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required arg: provider".into()))?;
+                let model = args
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required arg: model".into()))?;
+                let system_prompt = args
+                    .get("system_prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("You are a focused sub-agent. Answer the parent's subtask concisely and stop.")
+                    .to_string();
+
+                let parent_session = args
+                    .get("parent_session_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("root");
+                let child_session_id =
+                    format!("{parent_session}::sub-{}", chrono::Utc::now().timestamp_millis());
+
+                let child_payload = json!({
+                    "session_id": child_session_id,
+                    "parent_session_id": parent_session,
+                    "provider": provider,
+                    "model": model,
+                    "system_prompt": system_prompt,
+                    "messages": [{
+                        "role": "user",
+                        "content": [{"type": "text", "text": prompt}],
+                        "timestamp": chrono::Utc::now().timestamp_millis(),
+                    }],
+                    "tools": [],
+                });
+
+                let response = iii
+                    .trigger(TriggerRequest {
+                        function_id: "agent::run_loop".to_string(),
+                        payload: child_payload,
+                        action: None,
+                        timeout_ms: None,
+                    })
+                    .await;
+
+                let result = match response {
+                    Ok(value) => {
+                        let messages = value
+                            .get("messages")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        let final_text = messages
+                            .iter()
+                            .rev()
+                            .find_map(|m| {
+                                let role = m.get("role").and_then(Value::as_str)?;
+                                if role != "assistant" {
+                                    return None;
+                                }
+                                let content = m.get("content").and_then(Value::as_array)?;
+                                let text = content
+                                    .iter()
+                                    .filter_map(|c| {
+                                        if c.get("type").and_then(Value::as_str) == Some("text") {
+                                            c.get("text").and_then(Value::as_str)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if text.is_empty() {
+                                    None
+                                } else {
+                                    Some(text)
+                                }
+                            })
+                            .unwrap_or_else(|| "<sub-agent returned no text>".to_string());
+
+                        ToolResult {
+                            content: vec![ContentBlock::Text(TextContent { text: final_text })],
+                            details: json!({
+                                "child_session_id": child_session_id,
+                                "turn_count": messages.len(),
+                                "via": "tool::run_subagent",
+                            }),
+                            terminate: false,
+                        }
+                    }
+                    Err(e) => ToolResult {
+                        content: vec![ContentBlock::Text(TextContent {
+                            text: format!("sub-agent failed: {e}"),
+                        })],
+                        details: json!({
+                            "child_session_id": child_session_id,
+                            "via": "tool::run_subagent",
+                            "error": e.to_string(),
+                        }),
+                        terminate: false,
+                    },
+                };
+
                 serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
             }
         },

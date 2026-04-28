@@ -2,7 +2,9 @@
 
 Single-agent loop runtime on [iii-engine](https://iii.dev). 44 narrow workers, all iii-first.
 
-> Status: 0.11.0, 0.x experimental. API surface unstable until production-proven.
+> Status: 0.11.7, 0.x experimental. API surface unstable until production-proven.
+> Live-validated: 9 e2e tests against a real iii engine, 41 lib test crates,
+> 2 TUI render snapshots, 32 upstream tests on the llm-router PR.
 
 ## Install
 
@@ -60,11 +62,25 @@ iii worker add llm-router
 #   model ids, else fall back to the caller's hint.
 # → When llm-router isn't on the bus, harness dispatches directly. No flag.
 
-# Tier 4 — policy enforcement
+# Tier 4 — policy enforcement (denylist + audit + DLP)
 cargo run --release --bin policy-denylist -- --deny "bash:rm -rf,sudo" &
+cargo run --release --bin audit-log     -- --log ~/.harness/audit.jsonl &
+cargo run --release --bin dlp-scrubber &
 ./target/release/harness "delete all logs"
 # → before_tool_call fan-out. policy-denylist replies { block: true, reason }.
-# → Loop blocks the call. Agent sees the block, plans around it.
+#   Loop blocks the call. Agent sees the block, plans around it.
+# → after_tool_call fan-out (parallel). audit-log appends a JSONL line per
+#   call. dlp-scrubber rewrites secrets (AWS / OpenAI / GitHub / Stripe /
+#   Google) in the result text via merge_after's `content` override.
+# All three subscribers are live-validated in the e2e suite as of 0.11.7.
+
+# Tier 5 — sub-agent recursion + context transforms
+./target/release/harness "use run_subagent for the file scan, summarise"
+# → tool::run_subagent spawns a focused child loop; bounded at depth 3
+#   (override via max_subagent_depth) to prevent unbounded recursion.
+# → transform_context fan-out runs before every stream_assistant call;
+#   subscribers can rewrite the in-flight messages array (e.g. context
+#   compaction, redaction, system-prompt injection).
 ```
 
 Each tier = one worker addition. No code change in harness. This is iii primitives + narrow workers in practice.
@@ -161,13 +177,27 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # pick provider + model
 ./target/release/harness --provider openai --model gpt-4o "say hi"
 ./target/release/harness --provider groq --model llama-3.3-70b-versatile "say hi"
+
+# zero-config smoke (no API key needed)
+./target/release/harness --provider faux --model echo "say hi"
+
+# experimental providers (endpoint URL not yet verified upstream)
+./target/release/harness --provider zai --experimental-providers "..."
+# Without the flag, harness refuses with a remediation hint.
+# Gated set: opencode-go, minimax, huggingface, opencode-zen, zai,
+# vercel-ai-gateway, kimi-coding.
 ```
+
+Flags worth knowing:
+- `--max-turns <n>` — hard cap on assistant turns (default 10). Loop emits a synthetic "loop stopped" assistant message and exits cleanly when reached.
+- `--engine-url <ws>` — override `ws://127.0.0.1:49134`.
+- `--experimental-providers` — opt in to the seven providers whose upstream endpoint URL hasn't been verified.
 
 Built-in tools the agent can call:
 - `read`, `write`, `edit` — file ops with diff-style replace
 - `ls`, `find`, `grep` — directory walks and substring search
-- `bash` — `bash -lc` on host, or routed through `iii-sandbox::exec` when the sandbox worker is registered
-- `run_subagent` — spawn a focused sub-agent for a subtask, returns its final answer
+- `bash` — `bash -lc` on host, or routed through `iii-sandbox::exec` when the sandbox worker is registered. Emits a single `tracing::warn!` on the first host fallback so the user knows commands aren't sandboxed.
+- `run_subagent` — spawn a focused sub-agent for a subtask, returns its final answer. Bounded at depth 3 by default (override per-call via `max_subagent_depth`); the chain is encoded in the session-id (`root::sub-...::sub-...`).
 
 CLI prints AgentEvents as they stream so you can watch the agent reason, call tools, iterate.
 
@@ -270,11 +300,13 @@ PDF + DOCX text extraction.
 
 Three pubsub topics. Subscribers are independent workers; the loop fans out via `publish_collect` (write event with `event_id` to topic, poll `agent::hook_reply/<event_id>` for replies, merge).
 
-| Topic | Subscriber reply shape | Merge rule |
-|---|---|---|
-| `agent::before_tool_call` | `{ block: bool, reason: str }` | first-blocker-wins |
-| `agent::after_tool_call` | partial `ToolResult` (`content`, `details`, `terminate`) | field-by-field |
-| `agent::transform_context` | `{ messages: [...] }` or bare `[...]` | last reply wins |
+| Topic | Subscriber reply shape | Merge rule | Live-validated |
+|---|---|---|---|
+| `agent::before_tool_call` | `{ block: bool, reason: str }` | first-blocker-wins | ✅ `policy_denylist_blocks_tool_dispatch` + `hooks_before_and_after_see_tool_calls` |
+| `agent::after_tool_call` | partial `ToolResult` (`content`, `details`, `terminate`) | field-by-field | ✅ `audit_log_records_after_tool_call` + `dlp_scrubber_rewrites_secret_in_tool_result` |
+| `agent::transform_context` | `{ messages: [...] }` or bare `[...]` | last reply wins | ✅ `transform_context_subscriber_mutates_messages` |
+
+Subscribers reply via `stream::set` with `(stream_name=agent::hook_reply, group_id=event_id, item_id=<uuid>)`. iii v0.11.x silently drops writes missing `item_id` — every shipped harness subscriber mints one per reply.
 
 Add a custom hook by registering an iii function and binding a `subscribe` trigger. See `workers/hook-example/src/lib.rs` for the minimal pattern and `workers/policy-subscribers/src/lib.rs` for production-shape examples.
 
@@ -323,30 +355,68 @@ workers/
 
 1. `IiiRuntime::publish_collect` mints `event_id` (uuid v4).
 2. Publishes `{ event_id, reply_stream: "agent::hook_reply", payload: {...} }` to the topic.
-3. Subscribers receive the envelope, do their work, write reply via `stream::set` on `(stream_name="agent::hook_reply", group_id=event_id)`.
-4. Runtime polls `stream::list` until `timeout_ms` (default 5000), collects every reply.
+3. Subscribers receive the envelope, do their work, write reply via `stream::set` on `(stream_name="agent::hook_reply", group_id=event_id, item_id=<fresh uuid>)`. The `item_id` is mandatory — iii v0.11.x silently drops writes without one.
+4. Runtime polls `stream::list` until `timeout_ms` (default 5000), accepting both the bare-array shape iii v0.11.x ships and the older `{items: [...]}` envelope. Collects every reply, normalising `item.get("data")` or the bare item.
 5. `harness_runtime::hooks` (`merge_before` / `merge_after` / `decode_transform`) composes the final outcome.
 
-When iii-sdk grows native `publish_collect`, the polling falls away — the merge logic stays.
+When iii-sdk grows a `Stream` trigger that fires per new item without polling (the type already exists in `iii_sdk::builtin_triggers`; semantics around backfill / ordering need validation), the polling falls away. Merge logic stays.
 
 ## Testing
 
 ```bash
-# Unit + integration tests (skips live e2e)
-cargo test --workspace
+# Lib + integration tests (skips live e2e)
+cargo test --workspace --lib --release        # 41 lib test crates
+cargo test --release -p harness-tui --test render_snapshot   # 2 ratatui snapshots
 
 # Live end-to-end against a running iii engine
 iii --use-default-config &
-IIIX_TEST_ENGINE_URL=ws://127.0.0.1:49134 cargo test -p replay-test --test end_to_end
+IIIX_TEST_ENGINE_URL=ws://127.0.0.1:49134 \
+  cargo test --release -p replay-test --test end_to_end -- --test-threads=1
 ```
 
-The e2e test registers `harness-runtime` + `provider-faux`, drives `agent::run_loop` against a canned response, asserts the transcript is non-error with at least one assistant message.
+Nine gated e2e tests cover the bus-mediated paths the unit tests can't:
+
+| Test | What it proves |
+|---|---|
+| `faux_round_trip` | runtime + faux provider + run_loop round-trip |
+| `llm_router_swaps_provider_and_model` | tier-3 router delegation rewrites `(provider, model)` |
+| `policy_denylist_blocks_tool_dispatch` | `merge_before` short-circuits dispatch when a subscriber blocks |
+| `hooks_before_and_after_see_tool_calls` | hook-example subscribers fire on both topics with counters proof |
+| `audit_log_records_after_tool_call` | `policy::audit_log` writes one JSONL line per dispatch |
+| `dlp_scrubber_rewrites_secret_in_tool_result` | `policy::dlp_scrubber` replaces secrets via `merge_after.content` |
+| `transform_context_subscriber_mutates_messages` | the third hook topic rewrites the in-flight messages array |
+| `run_subagent_refuses_at_depth_limit` | sub-agent depth-3 cap fires before nested run_loop spawn |
+| `oauth_anthropic_register_smoke` | oauth-anthropic registers `login/refresh/status` and `status` is callable |
+
+TUI snapshots render `App` against a `TestBackend` at fixed dimensions, capture the trimmed cell buffer (style discarded for stability), and diff via `insta`. Re-bless with `cargo insta test -p harness-tui --review`.
 
 ## Status
 
-Apache-2.0. v0.11.0 — `policy-subscribers` reference workers + refreshed `ARCHITECTURE.md` + verified live e2e. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.11.0). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`. Remaining iii-sdk gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
+Apache-2.0. v0.11.7 — full live e2e for all three hook topics + sub-agent depth + oauth registration smoke + TUI render snapshots. See [release notes](https://github.com/iii-experimental/harness/releases/tag/v0.11.7). Specs in repo: `ARCHITECTURE.md`, `PHASES.md`. Remaining iii-sdk gaps tracked in [`docs/SDK-BLOCKED.md`](docs/SDK-BLOCKED.md).
 
 Both `harness-cli` and `harness-tui` are iii-first thin invokers as of v0.8. Hook subscribers can block tool calls, modify tool results, and rewrite context as of v0.10.
+
+### Loop semantics scoreboard
+
+| Bucket | Status |
+|---|---|
+| 12 canonical agent fns | ✅ shipped |
+| 8 builtin tools | ✅ shipped |
+| 3 hook topics live e2e | ✅ 3/3 |
+| 3 policy subscribers live e2e | ✅ 3/3 (denylist + audit + dlp) |
+| Sub-agent depth cap (default 3) | ✅ shipped |
+| max_turns enforcement | ✅ shipped |
+| Provider workers compiled + registered | 22/22 (15 verified, 7 gated) |
+| OAuth flows | 5 registered, 1 e2e smoke |
+| TUI snapshot tests | ✅ 2 |
+
+### Behaviour fixed since v0.11.0 you may not notice
+
+- `stream::list` envelope drift: CLI/TUI/runtime now accept the bare-array shape iii v0.11.x ships with the `{items: [...]}` fallback (CLI was silent before v0.11.5).
+- Hook replies were silently dropped: every harness subscriber now mints `item_id: uuid::v4()` on `stream::set` (v0.11.6).
+- `agent::run_loop` SDK-default 30s timeout: CLI/TUI cap at 600s, provider dispatch at 300s, run_subagent at 600s (v0.11.5/v0.11.6).
+- Audit-log byte-interleave: append_jsonl serialises writes per path with a process-wide tokio Mutex map (v0.11.7).
+- `RouterPresenceCache` blocked concurrent first-callers behind the bus probe; refactored to atomic fast path + double-checked-lock (v0.11.7).
 
 ## Contributing
 

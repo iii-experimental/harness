@@ -11,30 +11,41 @@ Single-agent loop runtime on [iii-engine](https://iii.dev). 44 narrow workers, a
 
 ## Install
 
-```bash
-# 1. iii engine (prerequisite)
-curl -fsSL https://install.iii.dev/iii/main/install.sh | sh
-
-# 2. harness (from source — crates.io publish lands at v1.0)
-git clone https://github.com/iii-experimental/harness && cd harness
-cargo build --release --bin harness --bin harness-tui --bin harnessd
-```
-
-Or, once shipped, use the harness installer that wraps both:
+One curl, one shell. Bootstraps the iii engine, rustup if missing, and builds harness, harness-tui, and harnessd into `~/.local/bin`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/iii-experimental/harness/main/install.sh | sh
 ```
 
-## Quick start
+<details>
+<summary>Build from source instead</summary>
 
 ```bash
-# 1. Boot an iii engine
-iii --use-default-config &
+# 1. iii engine prerequisite
+curl -fsSL https://install.iii.dev/iii/main/install.sh | sh
 
-# 2. Run the agent
+# 2. clone + build (crates.io publish lands at v1.0)
+git clone https://github.com/iii-experimental/harness && cd harness
+cargo build --release --bin harness --bin harness-tui --bin harnessd
+```
+
+</details>
+
+## Quick start
+
+Zero-config smoke (no API key, no provider account needed):
+
+```bash
+iii --use-default-config &
+harness --provider faux --model echo "say hi"
+# → "hello from faux — this is the harness zero-config smoke path."
+```
+
+That round-trips a session through the iii bus end-to-end in under a second. Once you see it work, swap the provider for a real one:
+
+```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-./target/release/harness "summarise this repo and list workspace crates using ls."
+harness "summarise this repo and list workspace crates using ls."
 ```
 
 You should see the agent stream events as it reads the README, calls `ls` on `workers/`, and produces a final summary.
@@ -208,9 +219,32 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 Flags worth knowing:
+- `--version`, `-V` — print version and exit.
 - `--max-turns <n>` — hard cap on assistant turns (default 10). Loop emits a synthetic "loop stopped" assistant message and exits cleanly when reached.
-- `--engine-url <ws>` — override `ws://127.0.0.1:49134`.
+- `--engine-url <ws>` / `HARNESS_ENGINE_URL` — override `ws://127.0.0.1:49134`. Env var honored as fallback.
+- `--json` — emit one `AgentEvent` JSON per line on stdout, then a final `{"type":"summary",...}`. Pipe to `jq`, build dashboards, write golden-trace tests.
 - `--experimental-providers` — opt in to the seven providers whose upstream endpoint URL hasn't been verified.
+
+Provider env vars (each provider reads its own key at the moment it's invoked; harness never touches them):
+
+| Provider | Env var |
+|---|---|
+| `anthropic` | `ANTHROPIC_API_KEY` |
+| `openai` / `openai-responses` | `OPENAI_API_KEY` |
+| `azure-openai` | `AZURE_OPENAI_KEY` + `AZURE_OPENAI_ENDPOINT` |
+| `google` | `GOOGLE_API_KEY` |
+| `google-vertex` | `GOOGLE_APPLICATION_CREDENTIALS` (ADC path) |
+| `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_REGION`) |
+| `openrouter` | `OPENROUTER_API_KEY` |
+| `groq` | `GROQ_API_KEY` |
+| `cerebras` | `CEREBRAS_API_KEY` |
+| `xai` | `XAI_API_KEY` |
+| `deepseek` | `DEEPSEEK_API_KEY` |
+| `mistral` | `MISTRAL_API_KEY` |
+| `fireworks` | `FIREWORKS_API_KEY` |
+| `huggingface` | `HF_TOKEN` |
+| `kimi-coding` / `minimax` / `zai` / `opencode-go` / `opencode-zen` / `vercel-ai-gateway` | provider-specific (see crate source — these are the seven `--experimental-providers` gated entries) |
+| `faux` | none (zero-config smoke) |
 
 Built-in tools the agent can call:
 - `read`, `write`, `edit` — file ops with diff-style replace
@@ -241,6 +275,8 @@ ratatui interactive UI. Same iii-bus shape as the CLI: connects to engine, regis
 - `HARNESS_ENGINE_URL` env var overrides the engine URL
 
 ## harnessd (all-in-one bundle)
+
+**When to reach for which.** Use `harness` (CLI) for one-shot driving — it registers the runtime + a single provider for the duration of the call, then disconnects. Use `harnessd` for persistent deployments where you want every harness worker on the bus alongside hook subscribers, the TUI, and other consumers; it stays running and lets multiple clients trigger `agent::run_loop` against the same registered surface.
 
 ```bash
 ./target/release/harnessd serve --providers all [--with-hook-example]

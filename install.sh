@@ -57,7 +57,32 @@ fi
 
 # Step 2 — toolchain
 require git "install git from https://git-scm.com/downloads"
-require cargo "install rustup from https://rustup.rs"
+
+# Bootstrap rustup if cargo is missing. Most fresh machines don't have a
+# Rust toolchain; failing here used to dead-end the installer with a URL
+# the user had to follow manually. Now we offer to run the official
+# rustup installer (read-only HTTPS, signed) and pick up cargo on the
+# next shell invocation. Override with HARNESS_SKIP_RUSTUP=1 to bail
+# instead of installing.
+if ! command -v cargo >/dev/null 2>&1; then
+    if [ "${HARNESS_SKIP_RUSTUP:-0}" = "1" ]; then
+        err "missing cargo and HARNESS_SKIP_RUSTUP=1 set"
+        err "install rustup from https://rustup.rs"
+        exit 1
+    fi
+    log "cargo not found; installing rustup via https://sh.rustup.rs"
+    if command -v curl >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    else
+        err "neither curl nor wget found; install one and retry"
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+fi
+require cargo "rustup bootstrap failed; install manually from https://rustup.rs and re-run"
 
 # Step 3 — clone or update
 mkdir -p "$(dirname "$REPO_DIR")"

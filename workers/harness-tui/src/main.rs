@@ -257,6 +257,10 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
                     .ok_or_else(|| anyhow::anyhow!("--theme requires a value"))?;
                 i += 2;
             }
+            "--version" | "-V" => {
+                println!("harness-tui {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);

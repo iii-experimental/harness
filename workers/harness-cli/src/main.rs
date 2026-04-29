@@ -50,6 +50,7 @@ struct CliArgs {
     max_turns: usize,
     engine_url: String,
     experimental_providers: bool,
+    json: bool,
 }
 
 fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
@@ -57,8 +58,13 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
     let mut provider = DEFAULT_PROVIDER.to_string();
     let mut model: Option<String> = None;
     let mut max_turns = 10usize;
-    let mut engine_url = DEFAULT_ENGINE_URL.to_string();
+    // Env-var fallback for engine URL keeps parity with harness-tui's
+    // HARNESS_ENGINE_URL behaviour and lets shells / CI export once
+    // instead of repeating --engine-url on every invocation.
+    let mut engine_url = std::env::var("HARNESS_ENGINE_URL")
+        .unwrap_or_else(|_| DEFAULT_ENGINE_URL.to_string());
     let mut experimental_providers = false;
+    let mut json = false;
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
@@ -95,6 +101,14 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
                 experimental_providers = true;
                 i += 1;
             }
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            "--version" | "-V" => {
+                println!("harness {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -121,6 +135,7 @@ fn parse_args_from(raw: &[String]) -> Result<CliArgs> {
         max_turns,
         engine_url,
         experimental_providers,
+        json,
     })
 }
 
@@ -141,9 +156,13 @@ fn print_help() {
     println!("  --model <id>           provider model id (default depends on --provider)");
     println!("  --max-turns <n>        stop after n turns (default: 10)");
     println!("  --engine-url <url>     iii-engine WebSocket URL (default: {DEFAULT_ENGINE_URL})");
+    println!("                          env: HARNESS_ENGINE_URL");
+    println!("  --json                 emit one AgentEvent JSON per line on stdout");
+    println!("                          (machine-readable; pipe to jq / dashboards)");
     println!("  --experimental-providers");
     println!("                          opt in to providers whose endpoint is unverified:");
     println!("                          {}", EXPERIMENTAL_PROVIDERS.join(", "));
+    println!("  --version, -V          print version and exit");
     println!();
     println!("tool::bash discovery:");
     println!("  the engine's iii-sandbox worker is detected at runtime via");
@@ -196,8 +215,10 @@ async fn main() -> Result<()> {
     });
 
     let last_index = Arc::new(AtomicUsize::new(0));
-    let printer = tokio::spawn(stream_events(
+    let json_mode = args.json;
+    let printer = tokio::spawn(stream_events_with_mode(
         iii.clone(),
+        json_mode,
         session_id.clone(),
         last_index.clone(),
     ));
@@ -222,7 +243,7 @@ async fn main() -> Result<()> {
     // dropped on the floor. last_index is shared so this picks up where
     // the polling task left off — no re-prints.
     printer.abort();
-    drain_stream_once(&iii, &session_id, &last_index).await;
+    drain_stream_once_with_mode(&iii, json_mode, &session_id, &last_index).await;
 
     let messages: Vec<AgentMessage> = response
         .get("messages")
@@ -233,14 +254,42 @@ async fn main() -> Result<()> {
         .flatten()
         .unwrap_or_default();
 
-    eprintln!("\n=== summary ===");
-    eprintln!("turns: {}", count_turns(&messages));
-    eprintln!("messages: {}", messages.len());
-    if let Some(AgentMessage::Assistant(a)) = messages.iter().rev().find(|m| matches!(m, AgentMessage::Assistant(_))) {
-        eprintln!("last_stop_reason: {:?}", a.stop_reason);
-        for block in &a.content {
-            if let ContentBlock::Text(t) = block {
-                eprintln!("last_text: {}", t.text);
+    if args.json {
+        // Machine-readable end-of-run summary on stdout. Streamed
+        // events already arrived on stdout via print_event_json.
+        let final_assistant = messages
+            .iter()
+            .rev()
+            .find_map(|m| if let AgentMessage::Assistant(a) = m { Some(a) } else { None });
+        let summary = json!({
+            "type": "summary",
+            "turns": count_turns(&messages),
+            "messages": messages.len(),
+            "stop_reason": final_assistant.map(|a| format!("{:?}", a.stop_reason)),
+            "error_message": final_assistant.and_then(|a| a.error_message.clone()),
+            "final_text": final_assistant.and_then(|a| {
+                a.content.iter().find_map(|c| {
+                    if let ContentBlock::Text(t) = c { Some(t.text.clone()) } else { None }
+                })
+            }),
+        });
+        println!("{summary}");
+    } else {
+        eprintln!("\n=== summary ===");
+        eprintln!("turns: {}", count_turns(&messages));
+        eprintln!("messages: {}", messages.len());
+        if let Some(AgentMessage::Assistant(a)) = messages.iter().rev().find(|m| matches!(m, AgentMessage::Assistant(_))) {
+            eprintln!("last_stop_reason: {:?}", a.stop_reason);
+            // Surface the API/provider error when the loop ended in
+            // StopReason::Error. Without this, "missing API key"
+            // shows as a silent Error with no remediation visible.
+            if let Some(err) = &a.error_message {
+                eprintln!("error: {err}");
+            }
+            for block in &a.content {
+                if let ContentBlock::Text(t) = block {
+                    eprintln!("last_text: {}", t.text);
+                }
             }
         }
     }
@@ -257,15 +306,15 @@ async fn connect_iii(engine_url: &str) -> Result<III> {
     match probe {
         Ok(Ok(_)) => Ok(iii),
         Ok(Err(e)) => {
-            eprintln!(
-                "failed to connect to iii engine at {engine_url}: {e}\nstart the engine, then retry. Override with --engine-url."
-            );
+            eprintln!("failed to connect to iii engine at {engine_url}: {e}");
+            eprintln!("start it with:  iii --use-default-config &");
+            eprintln!("override the URL with --engine-url or HARNESS_ENGINE_URL.");
             std::process::exit(2);
         }
         Err(_) => {
-            eprintln!(
-                "timed out connecting to iii engine at {engine_url}\nstart the engine, then retry. Override with --engine-url."
-            );
+            eprintln!("timed out connecting to iii engine at {engine_url} (5 s)");
+            eprintln!("start it with:  iii --use-default-config &");
+            eprintln!("override the URL with --engine-url or HARNESS_ENGINE_URL.");
             std::process::exit(2);
         }
     }
@@ -276,7 +325,12 @@ async fn connect_iii(engine_url: &str) -> Result<III> {
 /// where the polling task left off, no double-print. iii v0.11.x returns
 /// a bare array of the published `data` payloads (not `{items: [...]}` —
 /// see iii-sdk-0.11.3/tests/stream.rs:219); we accept either shape.
-async fn drain_stream_once(iii: &III, session_id: &str, last_index: &AtomicUsize) {
+async fn drain_stream_once_with_mode(
+    iii: &III,
+    json_mode: bool,
+    session_id: &str,
+    last_index: &AtomicUsize,
+) {
     let Ok(resp) = iii
         .trigger(TriggerRequest {
             function_id: "stream::list".to_string(),
@@ -309,7 +363,12 @@ async fn drain_stream_once(iii: &III, session_id: &str, last_index: &AtomicUsize
     let start = last_index.load(Ordering::Acquire);
     for item in items.iter().skip(start) {
         let payload = item.get("data").unwrap_or(item);
-        print_event(payload);
+        if json_mode {
+            // One AgentEvent JSON per line; downstream tools pipe to jq.
+            println!("{payload}");
+        } else {
+            print_event(payload);
+        }
     }
     last_index.store(items.len(), Ordering::Release);
 }
@@ -325,9 +384,14 @@ async fn drain_stream_once(iii: &III, session_id: &str, last_index: &AtomicUsize
 /// trigger would remove the 200 ms polling floor and pre-empt the final
 /// drain dance. Tracked separately so we can validate trigger semantics
 /// (backfill behaviour, ordering, replay) before flipping the default.
-async fn stream_events(iii: Arc<III>, session_id: String, last_index: Arc<AtomicUsize>) {
+async fn stream_events_with_mode(
+    iii: Arc<III>,
+    json_mode: bool,
+    session_id: String,
+    last_index: Arc<AtomicUsize>,
+) {
     loop {
-        drain_stream_once(&iii, &session_id, &last_index).await;
+        drain_stream_once_with_mode(&iii, json_mode, &session_id, &last_index).await;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }

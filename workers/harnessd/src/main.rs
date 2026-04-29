@@ -30,6 +30,10 @@ async fn main() -> Result<()> {
     match cmd {
         "serve" => cmd_serve(iter.collect()).await,
         "status" => cmd_status(iter.collect()).await,
+        "--version" | "-V" | "version" => {
+            println!("harnessd {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "--help" | "-h" | "help" => {
             print_usage();
             Ok(())

@@ -60,7 +60,17 @@ use crate::tools::{EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
 
 /// Default per-hook collection window. Subscribers that don't reply within
 /// this many milliseconds are dropped from the merge.
-const DEFAULT_HOOK_TIMEOUT_MS: u64 = 5_000;
+// Pubsub fan-out latency on iii v0.11.x is on the order of seconds for
+// cross-process subscribers (engine schedules subscriber invocations
+// asynchronously after the publish call returns). 5 s used to be enough
+// for in-process subscribers but real-world cross-process deployments
+// routinely miss replies within that window. 10 s is a pragmatic
+// middle ground: lets the loop wait long enough for cross-process
+// fan-out in production setups while keeping per-turn latency bounded
+// when no subscribers are registered (the polling loop's no-op cost is
+// dominated by the deadline). Override via HARNESS_HOOK_TIMEOUT_MS or
+// IiiRuntime::with_hook_timeout when you need a different envelope.
+const DEFAULT_HOOK_TIMEOUT_MS: u64 = 10_000;
 
 /// Stream name for agent events.
 pub const EVENTS_STREAM: &str = "agent::events";
@@ -670,15 +680,26 @@ fn register_stream_assistant(iii: &III) {
                 let mut provider = original_provider.clone();
                 if cache.has_router(&iii).await {
                     if let Some(routing_request) = build_routing_request(&payload) {
-                        if let Ok(decision) = iii
+                        let router_resp = iii
                             .trigger(TriggerRequest {
                                 function_id: "router::decide".to_string(),
                                 payload: routing_request,
                                 action: None,
                                 timeout_ms: None,
                             })
-                            .await
-                        {
+                            .await;
+                        if let Err(ref e) = router_resp {
+                            // Surface the router failure instead of silently
+                            // falling back to direct dispatch. Operators
+                            // expect their router to be load-bearing; a
+                            // silent skip masks deny_unknown_fields-style
+                            // schema rejects (see iii-hq/workers PR #58).
+                            tracing::warn!(
+                                error = %e,
+                                "router::decide call failed; falling back to direct provider dispatch"
+                            );
+                        }
+                        if let Ok(decision) = router_resp {
                             // RoutingDecision: { model, reason, policy_id?, ab_test_id?,
                             // fallback?, confidence, provider? }. The `provider` field shipped
                             // upstream in llm-router via iii-hq/workers PR #57 (merged
@@ -771,11 +792,13 @@ impl RouterPresenceCache {
         if self.initialised.load(std::sync::atomic::Ordering::Acquire) {
             return self.present.load(std::sync::atomic::Ordering::Acquire);
         }
-        let present = iii
-            .list_functions()
-            .await
-            .map(|infos| infos.iter().any(|f| f.function_id == "router::decide"))
-            .unwrap_or(false);
+        let present = match iii.list_functions().await {
+            Ok(infos) => infos.iter().any(|f| f.function_id == "router::decide"),
+            Err(e) => {
+                tracing::warn!(error = %e, "RouterPresenceCache probe failed; assuming router absent");
+                false
+            }
+        };
         self.present
             .store(present, std::sync::atomic::Ordering::Release);
         self.initialised

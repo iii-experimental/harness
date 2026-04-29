@@ -2,10 +2,12 @@
 
 Single-agent loop runtime on [iii-engine](https://iii.dev). 44 narrow workers, all iii-first.
 
-> Status: 0.11.8, 0.x experimental. API surface unstable until production-proven.
+> Status: 0.11.9, 0.x experimental. API surface unstable until production-proven.
 > Live-validated: 10 e2e tests against a real iii engine, 41 lib test crates,
-> 6 TUI render snapshots. llm-router `provider` field landed upstream
-> (iii-hq/workers PR #57, merged 2026-04-29).
+> 6 TUI render snapshots. Tier 1-4 of the composability ladder verified
+> cross-process (real `policy-denylist` binary blocking real Anthropic
+> tool calls). llm-router `provider` field upstream (iii-hq/workers#57);
+> `RoutingRequest` schema fix pending (iii-hq/workers#58).
 
 ## Install
 
@@ -53,7 +55,13 @@ iii worker add sandbox
 # → No flag changed in harness. Bus is the source of truth.
 
 # Tier 3 — smart provider routing (production deployment shape)
-iii worker add llm-router
+# `iii worker add llm-router` from the registry is broken at the time of
+# writing (engine returns "missing field `name`"; tracked upstream). For
+# now run from source:
+git clone https://github.com/iii-hq/workers /tmp/iii-workers
+cd /tmp/iii-workers/llm-router
+cargo run --release --bin iii-llm-router &
+cd -
 ./target/release/harness "say hi"
 # → agent::stream_assistant probes for router::decide on the bus once.
 # → When present, harness extracts the last user prompt + routing hints,
@@ -85,6 +93,16 @@ cargo run --release --bin dlp-scrubber &
 ```
 
 Each tier = one worker addition. No code change in harness. This is iii primitives + narrow workers in practice.
+
+**What's verified live, end-to-end:**
+
+| Tier | Same-process e2e | Cross-process e2e (real deployment shape) |
+|---|---|---|
+| 1 (baseline) | ✅ | ✅ — `harness --provider anthropic ...` over a real engine |
+| 2 (sandbox) | ✅ host fallback warns | ⏳ requires an iii-sandbox worker; not in the public registry yet |
+| 3 (llm-router) | ✅ via test fake | ✅ once upstream PR #58 (drop `deny_unknown_fields` on `RoutingRequest`) lands; harness already logs the router-call failure on `tracing::warn!` and falls back to direct dispatch |
+| 4 (policy-denylist) | ✅ | ✅ — verified driving anthropic with the standalone `policy-denylist` binary; required hook-timeout bump to 30 s (cross-process pubsub fan-out latency on iii v0.11.x is multi-second) |
+| 5 (sub-agent + transform_context) | ✅ | ⏳ same-process tested; cross-process driver pending |
 
 ## Architecture
 
@@ -422,6 +440,8 @@ Both `harness-cli` and `harness-tui` are iii-first thin invokers as of v0.8. Hoo
 - `agent::run_loop` SDK-default 30s timeout: CLI/TUI cap at 600s, provider dispatch at 300s, run_subagent at 600s (v0.11.5/v0.11.6).
 - Audit-log byte-interleave: append_jsonl serialises writes per path with a process-wide tokio Mutex map (v0.11.7).
 - `RouterPresenceCache` blocked concurrent first-callers behind the bus probe; refactored to atomic fast path + double-checked-lock (v0.11.7).
+- Cross-process pubsub fan-out latency: iii v0.11.x routes subscribers asynchronously after publish returns; in-process fan-out is sub-100 ms but cross-process can take seconds. Default hook timeout bumped 5 s → 30 s so cross-process subscribers (denylist + audit + dlp binaries) actually reach `merge_before` / `merge_after` before the loop dispatches (v0.11.9).
+- Router silent fall-through: `agent::stream_assistant` used to swallow `router::decide` errors. Now logs `tracing::warn!` so operators can see schema rejects (e.g. iii-sdk's `_caller_worker_id` injection vs llm-router's `deny_unknown_fields` — fix upstream at iii-hq/workers#58) (v0.11.9).
 
 ## Contributing
 

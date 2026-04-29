@@ -415,8 +415,8 @@ footer { border-top: 1px solid var(--line-strong); padding: 56px 0 36px; }
     <span class="sec-eyebrow"><b>§ 01 · SYSTEM</b> · bus topology</span>
     <span class="sec-counter">01 / 08</span>
   </div>
-  <h2 class="sec-h2">One engine. One bus. Workers register named functions.</h2>
-  <p class="sub">Every harness capability sits on the iii bus as a function. Callers (CLI, TUI, harnessd, hooks) dial functions by id. The agent loop never knows what's on the bus until it asks. Adding capability means adding a worker, not changing harness code.</p>
+  <h2 class="sec-h2">Three primitives. Worker registers Function. Trigger fires Function.</h2>
+  <p class="sub">A Worker is a process. A Function is a named async handler registered via <code class="code-inline">iii.register_function</code>. A Trigger is what fires it: default (direct trigger), http, subscribe (pubsub), stream, cron. Harness has no other primitives. The agent loop, the tools, the providers, the policy hooks, are all functions.</p>
 
   <div class="svg-wrap">
     <svg viewBox="0 0 1240 480" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;">
@@ -487,12 +487,12 @@ footer { border-top: 1px solid var(--line-strong); padding: 56px 0 36px; }
 
       <!-- functions column -->
       <rect x="655" y="60" width="240" height="46" fill="var(--bg)" stroke="var(--fg)" stroke-width="1.4"/>
-      <text x="775" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">agent::* (12)</text>
-      <text x="775" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">run_loop · stream_assistant · ...</text>
+      <text x="775" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">fn id: agent::* (12)</text>
+      <text x="775" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">loop, dispatch, hooks fan-out</text>
 
       <rect x="655" y="120" width="240" height="46" fill="var(--bg)" stroke="var(--fg)" stroke-width="1.4"/>
-      <text x="775" y="140" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">tool::* (8)</text>
-      <text x="775" y="156" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">read · write · edit · bash · ...</text>
+      <text x="775" y="140" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">fn id: tool::* (8)</text>
+      <text x="775" y="156" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">LLM tool-call bridge, same shape</text>
 
       <rect x="655" y="180" width="240" height="46" fill="var(--bg)" stroke="var(--fg)" stroke-width="1"/>
       <text x="775" y="200" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">provider::&lt;name&gt;::stream_assistant (22)</text>
@@ -562,8 +562,8 @@ footer { border-top: 1px solid var(--line-strong); padding: 56px 0 36px; }
     <span class="sec-eyebrow"><b>§ 02 · PRIMITIVES</b> · function registry</span>
     <span class="sec-counter">02 / 08</span>
   </div>
-  <h2 class="sec-h2">There are no tools. Tools are functions.</h2>
-  <p class="sub">Every primitive on the bus is the same shape: a name, an async handler, optional triggers. The agent loop discovers what to call by asking <code class="code-inline">iii.list_functions()</code>. Below is what register_with_iii actually registers.</p>
+  <h2 class="sec-h2">iii has three primitives. Worker, function, trigger. Nothing else.</h2>
+  <p class="sub">Every entry below is a function registered via <code class="code-inline">iii.register_function</code>. The <code class="code-inline">agent::</code>, <code class="code-inline">tool::</code>, <code class="code-inline">provider::</code>, <code class="code-inline">policy::</code> prefixes are naming conventions for grep, not categories. The engine treats them identically. Calling them happens with <code class="code-inline">iii.trigger(function_id, payload)</code>.</p>
 
   <div class="scroll-x">
     <table class="data">
@@ -585,15 +585,15 @@ footer { border-top: 1px solid var(--line-strong); padding: 56px 0 36px; }
         <tr><td>agent::push_steering</td><td>{ ok: true }</td><td>HTTP-callable</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
         <tr><td>agent::push_followup</td><td>{ ok: true }</td><td>HTTP-callable</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
 
-        <tr class="group"><td colspan="4">tool · 8 functions · <span class="sig">built-in</span> · same shape as agent::*</td></tr>
-        <tr><td>tool::read</td><td>{ content: ContentBlock[] }</td><td>BusToolHandler / inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
-        <tr><td>tool::write</td><td>ToolResult</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
-        <tr><td>tool::edit</td><td>ToolResult (search-replace)</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
-        <tr><td>tool::ls</td><td>ToolResult (entries)</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
-        <tr><td>tool::find</td><td>ToolResult (paths)</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
-        <tr><td>tool::grep</td><td>ToolResult (matches)</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
-        <tr><td>tool::bash</td><td>ToolResult · routes to <span class="acc">sandbox::exec</span> when present</td><td>BashTool</td><td class="num-col dim">harness-runtime/src/register.rs:1227</td></tr>
-        <tr><td>tool::run_subagent</td><td>ToolResult · nested run_loop, depth ≤ 3</td><td>register_tool_run_subagent</td><td class="num-col dim">harness-runtime/src/register.rs:1023</td></tr>
+        <tr class="group"><td colspan="4">tool::* · 8 functions · LLM tool-calling bridge · convention only</td></tr>
+        <tr><td>tool::read</td><td>{ content: ContentBlock[] }</td><td>iii.register_function · direct</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>tool::write</td><td>ToolResult</td><td>iii.register_function · direct</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>tool::edit</td><td>ToolResult (search-replace)</td><td>iii.register_function · direct</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>tool::ls</td><td>ToolResult (entries)</td><td>iii.register_function · direct</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>tool::find</td><td>ToolResult (paths)</td><td>iii.register_function · direct</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>tool::grep</td><td>ToolResult (matches)</td><td>iii.register_function · direct</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>tool::bash</td><td>ToolResult · routes to <span class="acc">sandbox::exec</span> when present</td><td>iii.register_function · stateful closure</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>tool::run_subagent</td><td>ToolResult · nested run_loop, depth ≤ 3</td><td>iii.register_function · direct</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
 
         <tr class="group"><td colspan="4">provider · 22 functions · <span class="sig">built-in</span> when registered</td></tr>
         <tr><td>provider::anthropic::stream_assistant</td><td>AssistantMessage</td><td>register_with_iii</td><td class="num-col dim">workers/provider-anthropic</td></tr>

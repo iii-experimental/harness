@@ -93,12 +93,21 @@ fn key_abort(session_id: &str) -> String {
     format!("session/{session_id}/abort_signal")
 }
 
-/// Register the canonical agent and tool functions on `iii`.
+/// Register the harness functions on `iii`.
 ///
-/// Provider crates must register `provider::<name>::stream_assistant` (or
-/// equivalent) separately so `agent::stream_assistant` can route to them.
-/// Tools are auto-discovered on the bus by `tool::*` prefix; nothing
-/// downstream needs to know about the builtins listed here.
+/// iii has three primitives: Worker, Function, Trigger. Everything below
+/// is a Function. The `agent::*`, `tool::*`, `provider::*`, `policy::*`
+/// prefixes are naming conventions for human grep + scanning of
+/// `iii.list_functions()` output; the engine treats them all the same.
+///
+/// `tool::*` exists to bridge the LLM's tool-calling protocol: when an
+/// assistant message emits `ContentBlock::ToolCall { name, ... }`, the
+/// loop does `iii.trigger("tool::<name>", payload)` and treats the
+/// response as a `ToolResult`. There is no "Tool" primitive on the bus.
+///
+/// Provider crates must register `provider::<name>::stream_assistant`
+/// (or equivalent) separately so `agent::stream_assistant` can route to
+/// them via `iii.trigger`.
 pub async fn register_with_iii(iii: &III) -> anyhow::Result<()> {
     register_run_loop(iii);
     register_stream_assistant(iii);
@@ -113,22 +122,17 @@ pub async fn register_with_iii(iii: &III) -> anyhow::Result<()> {
     register_push_steering(iii);
     register_push_followup(iii);
 
-    register_tool_simple(iii, "tool::read", "Read a file.", Arc::new(ReadTool));
-    register_tool_simple(iii, "tool::write", "Write a file.", Arc::new(WriteTool));
-    register_tool_simple(
-        iii,
-        "tool::edit",
-        "Edit a file in place.",
-        Arc::new(EditTool),
-    );
-    register_tool_simple(iii, "tool::ls", "List a directory.", Arc::new(LsTool));
-    register_tool_simple(iii, "tool::grep", "Substring search.", Arc::new(GrepTool));
-    register_tool_simple(
-        iii,
-        "tool::find",
-        "Find files by suffix.",
-        Arc::new(FindTool),
-    );
+    // Same shape as the agent::* registrations above. iii has no "tool"
+    // primitive; these are functions. The `tool::` prefix is a naming
+    // convention so callers reading `iii.list_functions()` can scan by
+    // category. The agent loop dispatches them via `iii.trigger` exactly
+    // like any other function.
+    register_tool_read(iii);
+    register_tool_write(iii);
+    register_tool_edit(iii);
+    register_tool_ls(iii);
+    register_tool_grep(iii);
+    register_tool_find(iii);
     register_tool_bash(iii);
     register_tool_run_subagent(iii);
 
@@ -1056,22 +1060,81 @@ async fn push_queue(
     Ok(json!({ "ok": true, "queued": count }))
 }
 
-fn register_tool_simple(
-    iii: &III,
-    function_id: &str,
-    description: &str,
-    handler: Arc<dyn ToolHandler>,
-) {
+// Each tool below is a direct `iii.register_function` call. No
+// trait-object indirection at the registration boundary; the closure
+// decodes the ToolCall envelope, runs the impl, serialises the
+// ToolResult. The unit structs in `crate::tools` keep their
+// ToolHandler impls so MemoryRuntime tests still have an in-process
+// dispatch path; production never touches them via that trait.
+
+fn register_tool_read(iii: &III) {
     iii.register_function((
-        RegisterFunctionMessage::with_id(function_id.to_string())
-            .with_description(description.to_string()),
-        move |payload: Value| {
-            let handler = handler.clone();
-            async move {
-                let tool_call = decode_tool_call(&payload)?;
-                let result = handler.execute(&tool_call).await;
-                serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
-            }
+        RegisterFunctionMessage::with_id("tool::read".into())
+            .with_description("Read a file.".into()),
+        |payload: Value| async move {
+            let tc = decode_tool_call(&payload)?;
+            let result = ReadTool.execute(&tc).await;
+            serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    ));
+}
+
+fn register_tool_write(iii: &III) {
+    iii.register_function((
+        RegisterFunctionMessage::with_id("tool::write".into())
+            .with_description("Write a file.".into()),
+        |payload: Value| async move {
+            let tc = decode_tool_call(&payload)?;
+            let result = WriteTool.execute(&tc).await;
+            serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    ));
+}
+
+fn register_tool_edit(iii: &III) {
+    iii.register_function((
+        RegisterFunctionMessage::with_id("tool::edit".into())
+            .with_description("Edit a file in place.".into()),
+        |payload: Value| async move {
+            let tc = decode_tool_call(&payload)?;
+            let result = EditTool.execute(&tc).await;
+            serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    ));
+}
+
+fn register_tool_ls(iii: &III) {
+    iii.register_function((
+        RegisterFunctionMessage::with_id("tool::ls".into())
+            .with_description("List a directory.".into()),
+        |payload: Value| async move {
+            let tc = decode_tool_call(&payload)?;
+            let result = LsTool.execute(&tc).await;
+            serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    ));
+}
+
+fn register_tool_grep(iii: &III) {
+    iii.register_function((
+        RegisterFunctionMessage::with_id("tool::grep".into())
+            .with_description("Substring search.".into()),
+        |payload: Value| async move {
+            let tc = decode_tool_call(&payload)?;
+            let result = GrepTool.execute(&tc).await;
+            serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
+        },
+    ));
+}
+
+fn register_tool_find(iii: &III) {
+    iii.register_function((
+        RegisterFunctionMessage::with_id("tool::find".into())
+            .with_description("Find files by suffix.".into()),
+        |payload: Value| async move {
+            let tc = decode_tool_call(&payload)?;
+            let result = FindTool.execute(&tc).await;
+            serde_json::to_value(result).map_err(|e| IIIError::Handler(e.to_string()))
         },
     ));
 }

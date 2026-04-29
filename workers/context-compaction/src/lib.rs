@@ -664,7 +664,7 @@ mod tests {
                     },
                     ContentBlock::ToolCall {
                         id: "2".into(),
-                        name: "tool::write".into(),
+                        name: "write".into(),
                         arguments: serde_json::json!({ "file_path": "src/b.rs" }),
                     },
                     ContentBlock::ToolCall {

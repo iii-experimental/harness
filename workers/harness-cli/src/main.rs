@@ -164,11 +164,11 @@ fn print_help() {
     println!("                          {}", EXPERIMENTAL_PROVIDERS.join(", "));
     println!("  --version, -V          print version and exit");
     println!();
-    println!("tool::bash discovery:");
+    println!("bash discovery:");
     println!("  the engine's iii-sandbox worker is detected at runtime via");
-    println!("  iii.list_functions(). When sandbox::exec is registered the bash");
-    println!("  tool routes commands through it; otherwise it falls back to a");
-    println!("  host-process bash. There is no flag to override this.");
+    println!("  iii.list_functions(). When sandbox::exec is registered, the");
+    println!("  bash function routes commands through it; otherwise it falls");
+    println!("  back to a host-process bash. There is no flag to override.");
 }
 
 #[tokio::main]

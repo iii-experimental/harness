@@ -468,7 +468,7 @@ async fn run_subagent_refuses_at_depth_limit() -> anyhow::Result<()> {
     let parent = "root::sub-1::sub-2::sub-3";
     let resp: Value = iii
         .trigger(TriggerRequest {
-            function_id: "tool::run_subagent".to_string(),
+            function_id: "run_subagent".to_string(),
             payload: json!({
                 "tool_call": {
                     "id": "tc-depth",
@@ -485,7 +485,7 @@ async fn run_subagent_refuses_at_depth_limit() -> anyhow::Result<()> {
             timeout_ms: Some(15_000),
         })
         .await
-        .expect("tool::run_subagent reachable");
+        .expect("run_subagent reachable");
 
     let limited = resp
         .get("details")

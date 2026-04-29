@@ -59,9 +59,9 @@ pub mod state_keys {
     pub const TOPIC_TRANSFORM: &str = "agent::transform_context";
 }
 
-/// Function-id prefix for tools auto-discovered on the bus. Any function
-/// whose id starts with this string is wrapped in [`BridgeToolHandler`].
-const TOOL_PREFIX: &str = "tool::";
+// No prefix. Function id == LLM-visible tool name. iii has three
+// primitives (Worker, Function, Trigger); a tool is an iii Function
+// whose id matches the name the LLM emits in `ContentBlock::ToolCall`.
 
 /// `LoopRuntime` implementation backed by the iii bus.
 pub struct IiiBridgeRuntime<C: IiiClientLike + 'static> {
@@ -147,7 +147,7 @@ impl<C: IiiClientLike + 'static> LoopRuntime for IiiBridgeRuntime<C> {
     }
 
     async fn resolve_tool(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
-        let function_id = format!("{TOOL_PREFIX}{name}");
+        let function_id = name.to_string();
         match self.client.list_function_ids().await {
             Ok(ids) if ids.iter().any(|id| id == &function_id) => {
                 Some(Arc::new(BridgeToolHandler {
@@ -446,10 +446,10 @@ mod tests {
     #[tokio::test]
     async fn resolve_tool_returns_handler_when_function_registered() {
         let client = Arc::new(FakeClient::new());
-        client.add_registered_function("tool::echo").await;
+        client.add_registered_function("echo").await;
         client
             .preset_invoke_response(
-                "tool::echo",
+                "echo",
                 json!({
                     "content": [{ "type": "text", "text": "from-bus" }],
                     "details": {},

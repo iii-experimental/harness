@@ -1,25 +1,38 @@
-//! iii-engine registration for the agent loop and the seven built-in tools.
+//! iii-engine registration for the agent loop and the eight builtin
+//! LLM-callable functions.
 //!
 //! [`register_with_iii`] turns this crate from a pure state machine into a
-//! live worker: every [`run_loop`] step, every built-in tool, and every
-//! state read flows through `iii.trigger`. The CLI calls this once at
-//! startup; everything else dispatches over the bus.
+//! live worker: every [`run_loop`] step, every builtin file/exec function,
+//! and every state read flows through `iii.trigger`. The CLI calls this
+//! once at startup; everything else dispatches over the bus.
 //!
 //! ## Function inventory
+//!
+//! iii has three primitives: Worker, Function, Trigger. Everything below
+//! is a Function registered via `iii.register_function`.
 //!
 //! | function id              | role |
 //! |--------------------------|------|
 //! | `agent::run_loop`        | Drive a session start to end. |
 //! | `agent::stream_assistant`| Provider router; calls `provider::<name>::stream_assistant`. |
 //! | `agent::prepare_tool`    | `before_tool_call` pubsub fan-out. |
-//! | `agent::execute_tool`    | Dispatch to `tool::<name>`. |
+//! | `agent::execute_tool`    | Dispatch by tool-call name via `iii.trigger`. |
 //! | `agent::finalize_tool`   | `after_tool_call` pubsub merge. |
 //! | `agent::transform_context` | Pubsub-pipeline context transform. |
 //! | `agent::convert_to_llm`  | Pure passthrough; provider crates override. |
 //! | `agent::get_steering`    | Drain steering queue. |
 //! | `agent::get_followup`    | Drain follow-up queue. |
 //! | `agent::abort`           | Set abort signal in iii state. |
-//! | `tool::read|write|edit|ls|grep|find|bash` | Built-in tools. |
+//! | `read` `write` `edit` `ls` `grep` `find` `bash` `run_subagent` | Builtin LLM-callable functions. Function id == LLM-visible tool name. |
+//!
+//! The `agent::` and `provider::` prefixes are naming conventions for
+//! grep, not categories. The eight LLM-callable builtins use the LLM-
+//! visible name as their function id directly: no harness-private
+//! prefix, no wrapper. When the assistant emits
+//! `ContentBlock::ToolCall { name: "read", ... }` the loop calls
+//! `iii.trigger("read", payload)`. The list of names exposed to the LLM
+//! is whatever `AgentTool[]` the caller passes to `agent::run_loop`;
+//! harness-runtime does not enforce a namespace.
 //!
 //! ## State key layout
 //!
@@ -31,9 +44,9 @@
 //! session/<id>/abort_signal   -> bool
 //! ```
 //!
-//! ## tool::bash discovery
+//! ## bash discovery
 //!
-//! The `tool::bash` handler probes `iii.list_functions()` on each call and
+//! The `bash` handler probes `iii.list_functions()` on each call and
 //! dispatches to `sandbox::exec` if the iii-sandbox worker is loaded. If
 //! not, it spawns a host-process bash. There is no user flag — the bus is
 //! the source of truth.
@@ -95,18 +108,17 @@ fn key_abort(session_id: &str) -> String {
 
 /// Register the harness functions on `iii`.
 ///
-/// iii has three primitives: Worker, Function, Trigger. Everything below
-/// is a Function. The `agent::*`, `tool::*`, `provider::*`, `policy::*`
-/// prefixes are naming conventions for human grep + scanning of
-/// `iii.list_functions()` output; the engine treats them all the same.
+/// iii has three primitives: Worker, Function, Trigger. Every entry is a
+/// Function. The `agent::` and `provider::` prefixes are naming
+/// conventions for grep, not categories; the engine treats every id the
+/// same. The eight LLM-callable builtins (`read`, `write`, `edit`, `ls`,
+/// `grep`, `find`, `bash`, `run_subagent`) register under the same name
+/// the LLM emits in `ContentBlock::ToolCall { name }`. The agent loop
+/// dispatches via `iii.trigger(name, payload)` directly; no prefix
+/// mapping, no wrapper.
 ///
-/// `tool::*` exists to bridge the LLM's tool-calling protocol: when an
-/// assistant message emits `ContentBlock::ToolCall { name, ... }`, the
-/// loop does `iii.trigger("tool::<name>", payload)` and treats the
-/// response as a `ToolResult`. There is no "Tool" primitive on the bus.
-///
-/// Provider crates must register `provider::<name>::stream_assistant`
-/// (or equivalent) separately so `agent::stream_assistant` can route to
+/// Provider crates register `provider::<name>::stream_assistant` (or
+/// equivalent) separately so `agent::stream_assistant` can route to
 /// them via `iii.trigger`.
 pub async fn register_with_iii(iii: &III) -> anyhow::Result<()> {
     register_run_loop(iii);
@@ -122,11 +134,10 @@ pub async fn register_with_iii(iii: &III) -> anyhow::Result<()> {
     register_push_steering(iii);
     register_push_followup(iii);
 
-    // Same shape as the agent::* registrations above. iii has no "tool"
-    // primitive; these are functions. The `tool::` prefix is a naming
-    // convention so callers reading `iii.list_functions()` can scan by
-    // category. The agent loop dispatches them via `iii.trigger` exactly
-    // like any other function.
+    // Same shape as the agent::* registrations above. Function id ==
+    // the LLM-visible tool name, no prefix. The agent loop calls
+    // `iii.trigger(tool_call.name, payload)` directly when an assistant
+    // message emits a ToolCall.
     register_tool_read(iii);
     register_tool_write(iii);
     register_tool_edit(iii);
@@ -333,7 +344,12 @@ impl LoopRuntime for IiiRuntime {
     }
 
     async fn resolve_tool(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
-        let function_id = format!("tool::{name}");
+        // Function id == LLM-visible tool name. No `tool::` prefix; iii has
+        // no Tool primitive, just functions. The agent's tool list (the
+        // AgentTool[] passed to run_loop) is what binds an LLM-visible
+        // name to a function id; harness-runtime registers builtins with
+        // their LLM-visible names directly.
+        let function_id = name.to_string();
         let ids = self.list_function_ids().await;
         if ids.iter().any(|id| id == &function_id) {
             Some(Arc::new(BusToolHandler {
@@ -450,7 +466,8 @@ impl EventSink for IiiSink {
     }
 }
 
-/// `ToolHandler` that dispatches to a `tool::<name>` function on the bus.
+/// `ToolHandler` impl that dispatches to a function whose id matches the
+/// LLM-visible tool name (`iii.trigger(name, payload)`).
 struct BusToolHandler {
     iii: III,
     function_id: String,
@@ -896,7 +913,7 @@ fn register_execute_tool(iii: &III) {
     let iii_for_handler = iii.clone();
     iii.register_function((
         RegisterFunctionMessage::with_id("agent::execute_tool".to_string())
-            .with_description("Dispatch a tool call to tool::<name>.".to_string()),
+            .with_description("Dispatch a tool call by name via iii.trigger.".to_string()),
         move |payload: Value| {
             let iii = iii_for_handler.clone();
             async move {
@@ -1069,7 +1086,7 @@ async fn push_queue(
 
 fn register_tool_read(iii: &III) {
     iii.register_function((
-        RegisterFunctionMessage::with_id("tool::read".into())
+        RegisterFunctionMessage::with_id("read".into())
             .with_description("Read a file.".into()),
         |payload: Value| async move {
             let tc = decode_tool_call(&payload)?;
@@ -1081,7 +1098,7 @@ fn register_tool_read(iii: &III) {
 
 fn register_tool_write(iii: &III) {
     iii.register_function((
-        RegisterFunctionMessage::with_id("tool::write".into())
+        RegisterFunctionMessage::with_id("write".into())
             .with_description("Write a file.".into()),
         |payload: Value| async move {
             let tc = decode_tool_call(&payload)?;
@@ -1093,7 +1110,7 @@ fn register_tool_write(iii: &III) {
 
 fn register_tool_edit(iii: &III) {
     iii.register_function((
-        RegisterFunctionMessage::with_id("tool::edit".into())
+        RegisterFunctionMessage::with_id("edit".into())
             .with_description("Edit a file in place.".into()),
         |payload: Value| async move {
             let tc = decode_tool_call(&payload)?;
@@ -1105,7 +1122,7 @@ fn register_tool_edit(iii: &III) {
 
 fn register_tool_ls(iii: &III) {
     iii.register_function((
-        RegisterFunctionMessage::with_id("tool::ls".into())
+        RegisterFunctionMessage::with_id("ls".into())
             .with_description("List a directory.".into()),
         |payload: Value| async move {
             let tc = decode_tool_call(&payload)?;
@@ -1117,7 +1134,7 @@ fn register_tool_ls(iii: &III) {
 
 fn register_tool_grep(iii: &III) {
     iii.register_function((
-        RegisterFunctionMessage::with_id("tool::grep".into())
+        RegisterFunctionMessage::with_id("grep".into())
             .with_description("Substring search.".into()),
         |payload: Value| async move {
             let tc = decode_tool_call(&payload)?;
@@ -1129,7 +1146,7 @@ fn register_tool_grep(iii: &III) {
 
 fn register_tool_find(iii: &III) {
     iii.register_function((
-        RegisterFunctionMessage::with_id("tool::find".into())
+        RegisterFunctionMessage::with_id("find".into())
             .with_description("Find files by suffix.".into()),
         |payload: Value| async move {
             let tc = decode_tool_call(&payload)?;
@@ -1139,7 +1156,7 @@ fn register_tool_find(iii: &III) {
     ));
 }
 
-/// Register `tool::run_subagent` — a tool that triggers a nested
+/// Register `run_subagent` — a tool that triggers a nested
 /// `agent::run_loop` with a child session id and returns the child's final
 /// assistant text. The agent advertises this tool whenever the sub-agent
 /// pattern is wanted; the LLM picks it up like any other tool.
@@ -1156,7 +1173,7 @@ fn register_tool_find(iii: &III) {
 fn register_tool_run_subagent(iii: &III) {
     let iii_for_handler = iii.clone();
     iii.register_function((
-        RegisterFunctionMessage::with_id("tool::run_subagent".to_string()).with_description(
+        RegisterFunctionMessage::with_id("run_subagent".to_string()).with_description(
             "Spawn a sub-agent for a focused subtask. Returns the sub-agent's final answer."
                 .to_string(),
         ),
@@ -1206,7 +1223,7 @@ fn register_tool_run_subagent(iii: &III) {
                     let result = ToolResult {
                         content: vec![ContentBlock::Text(TextContent { text: err.clone() })],
                         details: json!({
-                            "via": "tool::run_subagent",
+                            "via": "run_subagent",
                             "depth_limit_reached": true,
                             "depth": current_depth,
                             "max_depth": max_depth,
@@ -1288,7 +1305,7 @@ fn register_tool_run_subagent(iii: &III) {
                             details: json!({
                                 "child_session_id": child_session_id,
                                 "turn_count": messages.len(),
-                                "via": "tool::run_subagent",
+                                "via": "run_subagent",
                             }),
                             terminate: false,
                         }
@@ -1299,7 +1316,7 @@ fn register_tool_run_subagent(iii: &III) {
                         })],
                         details: json!({
                             "child_session_id": child_session_id,
-                            "via": "tool::run_subagent",
+                            "via": "run_subagent",
                             "error": e.to_string(),
                         }),
                         terminate: false,
@@ -1317,7 +1334,7 @@ fn register_tool_bash(iii: &III) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let bash = Arc::new(BashTool::new(iii.clone(), cwd));
     iii.register_function((
-        RegisterFunctionMessage::with_id("tool::bash".to_string()).with_description(
+        RegisterFunctionMessage::with_id("bash".to_string()).with_description(
             "Run a bash command. Routes to sandbox::exec when available.".to_string(),
         ),
         move |payload: Value| {
@@ -1382,7 +1399,7 @@ fn decode_required<T: serde::de::DeserializeOwned>(
     serde_json::from_value(raw).map_err(|e| IIIError::Handler(e.to_string()))
 }
 
-/// `tool::bash` handler. Probes the bus for `sandbox::exec` on every call;
+/// `bash` handler. Probes the bus for `sandbox::exec` on every call;
 /// if registered, dispatches the command into the sandbox. Otherwise spawns
 /// a host-process bash. The discovery is deliberately per-call so a sandbox
 /// worker that registers mid-session takes effect immediately.
@@ -1506,7 +1523,7 @@ impl ToolHandler for BashTool {
                 .swap(true, std::sync::atomic::Ordering::AcqRel)
             {
                 tracing::warn!(
-                    "sandbox::exec not registered on the bus — tool::bash is running on the host shell. Register an iii-sandbox worker to isolate commands."
+                    "sandbox::exec not registered on the bus — bash function is running on the host shell. Register an iii-sandbox worker to isolate commands."
                 );
             }
             self.run_on_host(&command).await

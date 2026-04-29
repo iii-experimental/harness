@@ -37,7 +37,7 @@ fn arg_path(args: &serde_json::Value, key: &str) -> Option<PathBuf> {
     arg_string(args, key).map(PathBuf::from)
 }
 
-/// `tool::read` — read a file's contents. Args: `{ path: string, max_bytes?: u64 }`.
+/// `read` function — read a file's contents. Args: `{ path: string, max_bytes?: u64 }`.
 pub struct ReadTool;
 
 #[async_trait]
@@ -56,7 +56,7 @@ impl ToolHandler for ReadTool {
     }
 }
 
-/// `tool::write` — write a file. Args: `{ path: string, content: string }`.
+/// `write` function — write a file. Args: `{ path: string, content: string }`.
 pub struct WriteTool;
 
 #[async_trait]
@@ -82,7 +82,7 @@ impl ToolHandler for WriteTool {
     }
 }
 
-/// `tool::edit` — replace `old_string` with `new_string` in a file.
+/// `edit` function — replace `old_string` with `new_string` in a file.
 ///
 /// Args: `{ path: string, old_string: string, new_string: string }`. Fails if
 /// the old string is not present or appears more than once (caller must add
@@ -125,7 +125,7 @@ impl ToolHandler for EditTool {
     }
 }
 
-/// `tool::ls` — list directory entries. Args: `{ path: string }`.
+/// `ls` function — list directory entries. Args: `{ path: string }`.
 pub struct LsTool;
 
 #[async_trait]
@@ -147,7 +147,7 @@ impl ToolHandler for LsTool {
     }
 }
 
-/// `tool::find` — find files by name suffix. Args: `{ root: string, suffix: string }`.
+/// `find` function — find files by name suffix. Args: `{ root: string, suffix: string }`.
 /// Walks recursively up to a fixed depth to keep the contract simple.
 pub struct FindTool;
 
@@ -187,7 +187,7 @@ impl ToolHandler for FindTool {
     }
 }
 
-/// `tool::grep` — substring search across files in a directory. Args:
+/// `grep` function — substring search across files in a directory. Args:
 /// `{ root: string, pattern: string }`. Reports `path:line_no:line` per match.
 pub struct GrepTool;
 
@@ -235,7 +235,7 @@ impl ToolHandler for GrepTool {
     }
 }
 
-/// `tool::bash` placeholder.
+/// `bash` placeholder.
 ///
 /// Production runtime dispatches to engine `shell` via iii.trigger; this
 /// default returns a not-implemented error so consumers can detect when a
@@ -247,7 +247,7 @@ impl ToolHandler for BashPlaceholder {
     async fn execute(&self, _tool_call: &ToolCall) -> ToolResult {
         ToolResult {
             content: vec![ContentBlock::Text(TextContent {
-                text: "tool::bash not wired in this runtime; bind engine shell worker".into(),
+                text: "bash function not wired; bind iii-sandbox or host shell".into(),
             })],
             details: serde_json::json!({ "wired": false }),
             terminate: false,

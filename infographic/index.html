@@ -1,0 +1,1231 @@
+<!doctype html>
+<html lang="en" data-theme="cream">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>harness / system reference</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+:root[data-theme="cream"] {
+  --bg: #f2ede1;
+  --bg-2: #ebe5d4;
+  --paper-grid: rgba(12, 11, 10, 0.045);
+  --fg: #0c0b0a;
+  --fg-2: rgba(12, 11, 10, 0.74);
+  --fg-3: rgba(12, 11, 10, 0.5);
+  --line: rgba(12, 11, 10, 0.14);
+  --line-strong: rgba(12, 11, 10, 0.26);
+  --accent: oklch(0.62 0.16 45);
+  --signal: oklch(0.55 0.13 155);
+}
+:root[data-theme="dark"] {
+  --bg: #0d0c0a;
+  --bg-2: #15140f;
+  --paper-grid: rgba(232, 226, 211, 0.045);
+  --fg: #efe9d8;
+  --fg-2: rgba(239, 233, 216, 0.78);
+  --fg-3: rgba(239, 233, 216, 0.52);
+  --line: rgba(239, 233, 216, 0.12);
+  --line-strong: rgba(239, 233, 216, 0.22);
+  --accent: oklch(0.72 0.16 45);
+  --signal: oklch(0.72 0.13 155);
+}
+:root[data-theme="light"] {
+  --bg: #fafaf7;
+  --bg-2: #f0eee7;
+  --paper-grid: rgba(12, 11, 10, 0.04);
+  --fg: #0a0a0a;
+  --fg-2: rgba(12, 11, 10, 0.7);
+  --fg-3: rgba(12, 11, 10, 0.46);
+  --line: rgba(12, 11, 10, 0.12);
+  --line-strong: rgba(12, 11, 10, 0.24);
+  --accent: oklch(0.6 0.16 45);
+  --signal: oklch(0.5 0.13 155);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Inter Tight', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  background-image:
+    linear-gradient(to right, var(--paper-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--paper-grid) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.container { width: min(1320px, 94vw); margin: 0 auto; }
+
+.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+.eyebrow {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+/* topnav */
+.topnav {
+  position: sticky; top: 0; z-index: 30;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.topnav-inner {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 0;
+}
+.brand {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--fg);
+}
+.brand b { color: var(--accent); font-weight: 700; }
+.theme-btn {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.theme-btn:hover { color: var(--fg); border-color: var(--fg-2); }
+
+/* doc header */
+.doc-header { padding: 56px 0 64px; border-bottom: 1px solid var(--line-strong); }
+.doc-id {
+  display: flex; justify-content: space-between;
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px;
+  letter-spacing: 0.18em; text-transform: uppercase; color: var(--fg-3);
+  margin-bottom: 36px;
+}
+.doc-title {
+  font-family: 'Inter Tight', sans-serif; font-weight: 600;
+  font-size: clamp(36px, 5vw, 64px);
+  letter-spacing: -0.025em;
+  line-height: 1.0;
+  margin: 0 0 22px;
+  color: var(--fg);
+}
+.doc-title .ghost { color: var(--fg-3); font-weight: 500; }
+.doc-subtitle {
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+  letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg-2);
+  max-width: 90ch;
+  line-height: 1.55;
+  margin: 0 0 40px;
+}
+.doc-meta {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  border: 1px solid var(--line-strong);
+  margin-bottom: 28px;
+}
+.doc-meta .cell {
+  padding: 14px 16px;
+  border-right: 1px solid var(--line);
+  font-family: 'JetBrains Mono', monospace;
+}
+.doc-meta .cell:last-child { border-right: none; }
+.doc-meta .label {
+  font-size: 9.5px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--fg-3); margin-bottom: 8px;
+}
+.doc-meta .value { font-size: 14px; font-weight: 500; color: var(--fg); }
+.doc-meta .value .num { color: var(--accent); font-weight: 700; }
+
+.legend {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  border: 1px solid var(--line-strong);
+  font-family: 'JetBrains Mono', monospace;
+}
+.legend-label {
+  padding: 10px 16px; border-right: 1px solid var(--line);
+  font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--fg-3); display: flex; align-items: center;
+}
+.legend-keys {
+  padding: 10px 16px;
+  display: flex; gap: 28px; flex-wrap: wrap;
+  font-size: 11.5px;
+}
+.legend-key { display: inline-flex; align-items: center; gap: 8px; color: var(--fg-2); }
+.legend-key .swatch {
+  display: inline-block; width: 11px; height: 11px;
+  border: 1px solid var(--fg);
+}
+.legend-key .swatch.signal { background: var(--signal); border-color: var(--signal); }
+.legend-key .swatch.accent { background: var(--accent); border-color: var(--accent); }
+.legend-key .swatch.neutral { background: var(--bg-2); }
+
+/* sections */
+section { border-top: 1px solid var(--line-strong); padding: 56px 0 60px; }
+section:first-of-type { border-top: none; }
+.sec-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+.sec-eyebrow {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.sec-eyebrow b { color: var(--accent); font-weight: 700; }
+.sec-counter {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px; letter-spacing: 0.18em; color: var(--fg-3);
+  white-space: nowrap;
+}
+.sec-h2 {
+  font-family: 'Inter Tight', sans-serif; font-weight: 600;
+  font-size: clamp(22px, 2.4vw, 30px);
+  letter-spacing: -0.018em;
+  margin: 0 0 14px;
+  color: var(--fg);
+}
+.sub {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px; line-height: 1.55; color: var(--fg-2);
+  max-width: 90ch;
+  margin: 0 0 32px;
+}
+
+/* tables */
+.scroll-x { overflow-x: auto; border: 1px solid var(--line-strong); }
+table.data {
+  width: 100%; border-collapse: collapse;
+  font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+table.data th {
+  font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--fg-3); font-weight: 500;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line-strong);
+  padding: 9px 14px; text-align: left;
+}
+table.data td {
+  padding: 9px 14px; border-bottom: 1px solid var(--line);
+  color: var(--fg);
+  vertical-align: top;
+}
+table.data tbody tr:hover { background: var(--bg-2); }
+table.data tr.group td {
+  background: var(--bg-2);
+  border-top: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--fg-3); padding: 8px 14px;
+}
+.num-col { text-align: right; }
+.dim { color: var(--fg-3); }
+.acc { color: var(--accent); }
+.sig { color: var(--signal); }
+.code-inline {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  background: var(--bg-2);
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  color: var(--fg);
+}
+
+/* svg containers */
+.svg-wrap { border: 1px solid var(--line-strong); background: var(--bg); padding: 18px; }
+.svg-wrap.no-pad { padding: 0; }
+
+/* formula blocks */
+.formula {
+  border: 1px solid var(--line-strong); background: var(--bg);
+  padding: 20px 22px; margin-top: 22px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.formula .name {
+  font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--fg-3); margin-bottom: 10px;
+}
+.formula .expr { font-size: 14px; line-height: 1.7; color: var(--fg); }
+.formula .expr .op { color: var(--fg-2); }
+.formula .expr .v { color: var(--accent); font-weight: 500; }
+.formula .where { font-size: 11px; color: var(--fg-2); margin-top: 12px; line-height: 1.6; }
+.formula .where code {
+  background: var(--bg-2); padding: 1px 5px; border: 1px solid var(--line);
+}
+
+/* boot log */
+pre.boot {
+  font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.7;
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  padding: 20px 22px;
+  overflow-x: auto;
+  color: var(--fg);
+  margin: 0;
+}
+pre.boot .c { color: var(--fg-3); }
+pre.boot .d { color: var(--fg-2); }
+pre.boot .a { color: var(--accent); font-weight: 500; }
+pre.boot .s { color: var(--signal); font-weight: 500; }
+pre.boot .t { color: var(--fg); font-weight: 700; }
+
+/* surfaces grid */
+.surfaces {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border: 1px solid var(--line-strong);
+}
+.surface-card {
+  padding: 22px 20px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  font-family: 'JetBrains Mono', monospace;
+}
+.surface-card:nth-child(4n) { border-right: none; }
+.surface-card:nth-last-child(-n+4) { border-bottom: none; }
+.surface-card .lbl {
+  font-size: 9.5px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--fg-3); margin-bottom: 8px;
+}
+.surface-card .nm {
+  font-size: 16px; color: var(--fg); font-weight: 500;
+  margin-bottom: 12px; letter-spacing: -0.01em;
+}
+.surface-card .nm .acc { color: var(--accent); font-weight: 700; }
+.surface-card ul { list-style: none; margin: 0; padding: 0; font-size: 11px; line-height: 1.65; color: var(--fg-2); }
+.surface-card ul li { padding: 1px 0; }
+
+/* footer */
+footer { border-top: 1px solid var(--line-strong); padding: 56px 0 36px; }
+.refs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: 1px solid var(--line-strong);
+}
+.refs .col {
+  padding: 22px 22px;
+  border-right: 1px solid var(--line);
+  font-family: 'JetBrains Mono', monospace;
+}
+.refs .col:last-child { border-right: none; }
+.refs .lbl {
+  font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--fg-3); margin-bottom: 12px;
+}
+.refs ul { list-style: none; margin: 0; padding: 0; font-size: 11px; line-height: 1.85; color: var(--fg-2); }
+.refs ul li { padding: 1px 0; }
+.refs ul li b { color: var(--fg); font-weight: 500; }
+
+.colophon {
+  display: flex; justify-content: space-between;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--fg-3);
+  margin-top: 32px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+}
+.colophon a { color: var(--fg-2); text-decoration: none; }
+.colophon a:hover { color: var(--accent); }
+
+@media (max-width: 920px) {
+  .doc-meta { grid-template-columns: repeat(3, 1fr); }
+  .doc-meta .cell:nth-child(3n) { border-right: none; }
+  .doc-meta .cell:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+  .surfaces { grid-template-columns: repeat(2, 1fr); }
+  .surface-card { border-right: 1px solid var(--line) !important; }
+  .surface-card:nth-child(2n) { border-right: none !important; }
+  .refs { grid-template-columns: 1fr; }
+  .refs .col { border-right: none; border-bottom: 1px solid var(--line); }
+  .refs .col:last-child { border-bottom: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="topnav"><div class="container topnav-inner">
+  <span class="brand"><b>harness</b> · system reference</span>
+  <button class="theme-btn" id="theme-cycle" type="button">theme · cream</button>
+</div></div>
+
+<div class="container">
+
+<!-- ============== HEADER ============== -->
+<header class="doc-header">
+  <div class="doc-id">
+    <span>system reference · single-page</span>
+    <span>rev 2026.04 · public</span>
+  </div>
+  <h1 class="doc-title">harness <span class="ghost">/ system reference</span></h1>
+  <p class="doc-subtitle">single-agent loop runtime on iii primitives. 44 narrow workers, ~120 named functions on one bus. zero plugin api, zero sdk extension points. add a worker, get a feature.</p>
+
+  <div class="doc-meta">
+    <div class="cell">
+      <div class="label">Version</div>
+      <div class="value"><span class="num">0.11.10</span> · 0.x</div>
+    </div>
+    <div class="cell">
+      <div class="label">Runtime</div>
+      <div class="value">Rust · iii-sdk <span class="num">0.11.3</span></div>
+    </div>
+    <div class="cell">
+      <div class="label">Workers</div>
+      <div class="value"><span class="num">44</span> crates</div>
+    </div>
+    <div class="cell">
+      <div class="label">Surface</div>
+      <div class="value"><span class="num">~120</span> iii fns</div>
+    </div>
+    <div class="cell">
+      <div class="label">Engine</div>
+      <div class="value">ws://:<span class="num">49134</span></div>
+    </div>
+    <div class="cell">
+      <div class="label">Tests</div>
+      <div class="value"><span class="num">41</span>+<span class="num">10</span>+<span class="num">6</span></div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="legend-label">Legend</div>
+    <div class="legend-keys">
+      <span class="legend-key"><span class="swatch signal"></span>built-in path · always present, no extra worker</span>
+      <span class="legend-key"><span class="swatch accent"></span>composable · requires registering a worker on the bus</span>
+      <span class="legend-key"><span class="swatch neutral" style="border-color:var(--fg);"></span>scaffold · types, traits, glue</span>
+      <span class="legend-key"><span style="color:var(--fg-2);font-size:11px;">solid → required · dashed → optional</span></span>
+    </div>
+  </div>
+</header>
+
+<!-- ============== § 01 SYSTEM ============== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-eyebrow"><b>§ 01 · SYSTEM</b> · bus topology</span>
+    <span class="sec-counter">01 / 08</span>
+  </div>
+  <h2 class="sec-h2">One engine. One bus. Workers register named functions.</h2>
+  <p class="sub">Every harness capability sits on the iii bus as a function. Callers (CLI, TUI, harnessd, hooks) dial functions by id. The agent loop never knows what's on the bus until it asks. Adding capability means adding a worker, not changing harness code.</p>
+
+  <div class="svg-wrap">
+    <svg viewBox="0 0 1240 480" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+        </marker>
+        <marker id="arr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"/>
+        </marker>
+        <marker id="arr-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--signal)"/>
+        </marker>
+      </defs>
+
+      <!-- column dividers -->
+      <line x1="310" y1="40" x2="310" y2="450" stroke="var(--line)" stroke-dasharray="2 4"/>
+      <line x1="620" y1="40" x2="620" y2="450" stroke="var(--line)" stroke-dasharray="2 4"/>
+      <line x1="930" y1="40" x2="930" y2="450" stroke="var(--line)" stroke-dasharray="2 4"/>
+
+      <!-- column labels -->
+      <text x="155" y="30" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--fg-3)" text-anchor="middle" letter-spacing="2">CALLERS</text>
+      <text x="465" y="30" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--fg-3)" text-anchor="middle" letter-spacing="2">TRIGGERS</text>
+      <text x="775" y="30" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--fg-3)" text-anchor="middle" letter-spacing="2">FUNCTIONS</text>
+      <text x="1085" y="30" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--fg-3)" text-anchor="middle" letter-spacing="2">STATE / STREAMS</text>
+
+      <!-- callers column -->
+      <rect x="35" y="60" width="240" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="155" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">harness-cli</text>
+      <text x="155" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">one-shot · trigger run_loop</text>
+
+      <rect x="35" y="120" width="240" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="155" y="140" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">harness-tui</text>
+      <text x="155" y="156" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">ratatui · interactive</text>
+
+      <rect x="35" y="180" width="240" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="155" y="200" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">harnessd</text>
+      <text x="155" y="216" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">all-in-one daemon</text>
+
+      <rect x="35" y="240" width="240" height="46" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="155" y="260" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">policy-denylist</text>
+      <text x="155" y="276" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">opt-in subscriber</text>
+
+      <rect x="35" y="300" width="240" height="46" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="155" y="320" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">audit-log · dlp-scrubber</text>
+      <text x="155" y="336" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">opt-in subscribers</text>
+
+      <rect x="35" y="360" width="240" height="46" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1.4" stroke-dasharray="3 4"/>
+      <text x="155" y="380" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">hook-example</text>
+      <text x="155" y="396" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">3 topic subscriber</text>
+
+      <!-- triggers column -->
+      <rect x="345" y="60" width="240" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="465" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">default trigger</text>
+      <text x="465" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">iii.trigger(fn, payload)</text>
+
+      <rect x="345" y="140" width="240" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="465" y="160" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">http</text>
+      <text x="465" y="176" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">POST /agent/prompt etc.</text>
+
+      <rect x="345" y="220" width="240" height="46" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1"/>
+      <text x="465" y="240" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">subscribe</text>
+      <text x="465" y="256" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">topic → fan-out</text>
+
+      <rect x="345" y="300" width="240" height="46" fill="var(--bg-2)" stroke="var(--fg-2)" stroke-width="1" stroke-dasharray="3 4"/>
+      <text x="465" y="320" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">stream:join</text>
+      <text x="465" y="336" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">unused · validation pending</text>
+
+      <!-- functions column -->
+      <rect x="655" y="60" width="240" height="46" fill="var(--bg)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="775" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">agent::* (12)</text>
+      <text x="775" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">run_loop · stream_assistant · ...</text>
+
+      <rect x="655" y="120" width="240" height="46" fill="var(--bg)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="775" y="140" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">tool::* (8)</text>
+      <text x="775" y="156" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">read · write · edit · bash · ...</text>
+
+      <rect x="655" y="180" width="240" height="46" fill="var(--bg)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="775" y="200" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">provider::&lt;name&gt;::stream_assistant (22)</text>
+      <text x="775" y="216" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">anthropic · openai · groq · faux · ...</text>
+
+      <rect x="655" y="240" width="240" height="46" fill="var(--bg)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="775" y="260" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">session::* · auth::* · models::*</text>
+      <text x="775" y="276" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">8 · 5 · 4 fns</text>
+
+      <rect x="655" y="300" width="240" height="46" fill="var(--bg)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="775" y="320" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">policy::* (3)</text>
+      <text x="775" y="336" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">denylist · audit_log · dlp_scrubber</text>
+
+      <rect x="655" y="360" width="240" height="46" fill="var(--bg)" stroke="var(--accent)" stroke-width="1"/>
+      <text x="775" y="380" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">router::* (18) · sandbox::* (n)</text>
+      <text x="775" y="396" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">added by iii worker add &lt;name&gt;</text>
+
+      <!-- state column -->
+      <rect x="965" y="60" width="240" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="1085" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">state KV</text>
+      <text x="1085" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">scope/key/value, JSON</text>
+
+      <rect x="965" y="140" width="240" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="1085" y="160" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">stream agent::events</text>
+      <text x="1085" y="176" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">group_id = session_id</text>
+
+      <rect x="965" y="220" width="240" height="46" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1"/>
+      <text x="1085" y="240" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">stream agent::hook_reply</text>
+      <text x="1085" y="256" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">group_id = event_id (uuid v4)</text>
+
+      <rect x="965" y="300" width="240" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="1085" y="320" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">session-tree</text>
+      <text x="1085" y="336" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">durable transcripts</text>
+
+      <!-- arrows: callers → triggers -->
+      <line x1="275" y1="83" x2="345" y2="83" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="275" y1="143" x2="345" y2="143" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="275" y1="203" x2="345" y2="203" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="275" y1="263" x2="345" y2="243" stroke="var(--accent)" marker-end="url(#arr-a)"/>
+      <line x1="275" y1="323" x2="345" y2="243" stroke="var(--accent)" marker-end="url(#arr-a)"/>
+      <line x1="275" y1="383" x2="345" y2="243" stroke="var(--accent)" stroke-dasharray="3 4" marker-end="url(#arr-a)"/>
+
+      <!-- arrows: triggers → functions -->
+      <line x1="585" y1="83" x2="655" y2="83" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="585" y1="83" x2="655" y2="143" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="585" y1="83" x2="655" y2="203" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="585" y1="83" x2="655" y2="263" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="585" y1="83" x2="655" y2="383" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="585" y1="163" x2="655" y2="83" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="585" y1="243" x2="655" y2="320" stroke="var(--accent)" marker-end="url(#arr-a)"/>
+
+      <!-- arrows: functions → state -->
+      <line x1="895" y1="83" x2="965" y2="160" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="895" y1="83" x2="965" y2="83" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="895" y1="83" x2="965" y2="320" stroke="var(--fg)" marker-end="url(#arr)"/>
+      <line x1="895" y1="320" x2="965" y2="240" stroke="var(--accent)" marker-end="url(#arr-a)"/>
+
+      <!-- caption -->
+      <text x="35" y="450" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--fg-3)">workers/harness-runtime/src/register.rs · workers/policy-subscribers/src/lib.rs · iii-sdk 0.11.3</text>
+    </svg>
+  </div>
+</section>
+
+<!-- ============== § 02 PRIMITIVES ============== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-eyebrow"><b>§ 02 · PRIMITIVES</b> · function registry</span>
+    <span class="sec-counter">02 / 08</span>
+  </div>
+  <h2 class="sec-h2">There are no tools. Tools are functions.</h2>
+  <p class="sub">Every primitive on the bus is the same shape: a name, an async handler, optional triggers. The agent loop discovers what to call by asking <code class="code-inline">iii.list_functions()</code>. Below is what register_with_iii actually registers.</p>
+
+  <div class="scroll-x">
+    <table class="data">
+      <thead>
+        <tr><th>Function id</th><th>Returns</th><th>Defined in</th><th class="num-col">Path</th></tr>
+      </thead>
+      <tbody>
+        <tr class="group"><td colspan="4">agent · 12 functions · <span class="sig">built-in</span></td></tr>
+        <tr><td>agent::run_loop</td><td>{ messages: AgentMessage[] }</td><td>register_run_loop</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::stream_assistant</td><td>AssistantMessage</td><td>register_stream_assistant</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::prepare_tool</td><td>ToolCall (validated)</td><td>register_prepare_tool</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::execute_tool</td><td>ToolResult</td><td>register_execute_tool</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::finalize_tool</td><td>ToolResult (post merge_after)</td><td>register_finalize_tool</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::transform_context</td><td>AgentMessage[]</td><td>register_transform_context</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::convert_to_llm</td><td>provider wire shape</td><td>register_convert_to_llm</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::get_steering</td><td>AgentMessage[] (drained)</td><td>register_get_steering</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::get_followup</td><td>AgentMessage[] (drained)</td><td>register_get_followup</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::abort</td><td>{ ok: true }</td><td>register_abort</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::push_steering</td><td>{ ok: true }</td><td>HTTP-callable</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+        <tr><td>agent::push_followup</td><td>{ ok: true }</td><td>HTTP-callable</td><td class="num-col dim">harness-runtime/src/register.rs</td></tr>
+
+        <tr class="group"><td colspan="4">tool · 8 functions · <span class="sig">built-in</span> · same shape as agent::*</td></tr>
+        <tr><td>tool::read</td><td>{ content: ContentBlock[] }</td><td>BusToolHandler / inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
+        <tr><td>tool::write</td><td>ToolResult</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
+        <tr><td>tool::edit</td><td>ToolResult (search-replace)</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
+        <tr><td>tool::ls</td><td>ToolResult (entries)</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
+        <tr><td>tool::find</td><td>ToolResult (paths)</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
+        <tr><td>tool::grep</td><td>ToolResult (matches)</td><td>inline</td><td class="num-col dim">harness-runtime/src/tools.rs</td></tr>
+        <tr><td>tool::bash</td><td>ToolResult · routes to <span class="acc">sandbox::exec</span> when present</td><td>BashTool</td><td class="num-col dim">harness-runtime/src/register.rs:1227</td></tr>
+        <tr><td>tool::run_subagent</td><td>ToolResult · nested run_loop, depth ≤ 3</td><td>register_tool_run_subagent</td><td class="num-col dim">harness-runtime/src/register.rs:1023</td></tr>
+
+        <tr class="group"><td colspan="4">provider · 22 functions · <span class="sig">built-in</span> when registered</td></tr>
+        <tr><td>provider::anthropic::stream_assistant</td><td>AssistantMessage</td><td>register_with_iii</td><td class="num-col dim">workers/provider-anthropic</td></tr>
+        <tr><td>provider::openai::stream_assistant</td><td>AssistantMessage</td><td>register_with_iii</td><td class="num-col dim">workers/provider-openai</td></tr>
+        <tr><td>provider::&lt;15 more&gt;::stream_assistant</td><td>AssistantMessage</td><td>register_with_iii</td><td class="num-col dim">workers/provider-*</td></tr>
+        <tr><td>provider::faux::stream_assistant</td><td>AssistantMessage · canned</td><td>register_with_iii</td><td class="num-col dim">workers/provider-faux</td></tr>
+
+        <tr class="group"><td colspan="4">policy · 3 functions · <span class="acc">composable, opt-in</span></td></tr>
+        <tr><td>policy::denylist</td><td>{ block: bool, reason }</td><td>subscribe_denylist</td><td class="num-col dim">workers/policy-subscribers/src/lib.rs:63</td></tr>
+        <tr><td>policy::audit_log</td><td>{ ok: true } · writes JSONL</td><td>subscribe_audit_log</td><td class="num-col dim">workers/policy-subscribers/src/lib.rs:108</td></tr>
+        <tr><td>policy::dlp_scrubber</td><td>{ content: redacted }</td><td>subscribe_dlp_scrubber</td><td class="num-col dim">workers/policy-subscribers/src/lib.rs:151</td></tr>
+
+        <tr class="group"><td colspan="4">session · 8 · auth · 5 · models · 4 · corpus · 4 · document · 1</td></tr>
+        <tr><td>session::create / append / messages</td><td>SessionEntry-aware</td><td>session-tree</td><td class="num-col dim">workers/session-tree</td></tr>
+        <tr><td>session::fork / clone / compact</td><td>branch · summarise</td><td>session-tree</td><td class="num-col dim">workers/session-tree</td></tr>
+        <tr><td>session::tree / export_html</td><td>tree shape · self-contained html</td><td>session-tree</td><td class="num-col dim">workers/session-tree</td></tr>
+        <tr><td>auth::{get,set,delete}_token, list_providers, status</td><td>credential vault</td><td>auth-storage</td><td class="num-col dim">workers/auth-storage</td></tr>
+        <tr><td>models::list / get / supports / register</td><td>state-first since v0.11.8</td><td>models-catalog</td><td class="num-col dim">workers/models-catalog/src/lib.rs:120</td></tr>
+        <tr><td>corpus::scan / redact / review / publish</td><td>session corpus pipeline</td><td>session-corpus</td><td class="num-col dim">workers/session-corpus</td></tr>
+        <tr><td>document::extract</td><td>PDF / DOCX text</td><td>document-extract</td><td class="num-col dim">workers/document-extract</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============== § 03 INGEST ============== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-eyebrow"><b>§ 03 · INGEST</b> · turn pipeline</span>
+    <span class="sec-counter">03 / 08</span>
+  </div>
+  <h2 class="sec-h2">A single turn fans through five distinct iii triggers.</h2>
+  <p class="sub">Caller fires agent::run_loop. The loop calls stream_assistant, which dispatches to a provider. The provider streams back an AssistantMessage. Tool calls are validated, fanned out via pubsub, dispatched, fanned out again, merged. Events stream back to the caller through agent::events.</p>
+
+  <div class="svg-wrap">
+    <svg viewBox="0 0 1240 340" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;">
+      <defs>
+        <marker id="i-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+        </marker>
+        <marker id="i-arr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"/>
+        </marker>
+      </defs>
+
+      <!-- main horizontal flow -->
+      <rect x="30" y="120" width="160" height="60" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="110" y="146" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">caller</text>
+      <text x="110" y="164" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">CLI · TUI · harnessd</text>
+
+      <line x1="190" y1="150" x2="240" y2="150" stroke="var(--fg)" marker-end="url(#i-arr)"/>
+
+      <rect x="240" y="120" width="170" height="60" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="325" y="146" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">agent::run_loop</text>
+      <text x="325" y="164" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">drives state machine</text>
+
+      <line x1="410" y1="150" x2="460" y2="150" stroke="var(--fg)" marker-end="url(#i-arr)"/>
+
+      <rect x="460" y="120" width="200" height="60" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="560" y="146" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">agent::stream_assistant</text>
+      <text x="560" y="164" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">probe router · dispatch</text>
+
+      <line x1="660" y1="150" x2="710" y2="150" stroke="var(--fg)" marker-end="url(#i-arr)"/>
+
+      <rect x="710" y="120" width="200" height="60" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="810" y="146" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">provider::&lt;n&gt;::stream_assistant</text>
+      <text x="810" y="164" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">streams events · cap 300s</text>
+
+      <line x1="910" y1="150" x2="960" y2="150" stroke="var(--fg)" marker-end="url(#i-arr)"/>
+
+      <rect x="960" y="120" width="220" height="60" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="1070" y="146" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">tool::&lt;name&gt;</text>
+      <text x="1070" y="164" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">if assistant emits tool_call</text>
+
+      <!-- branch up: router decide (composable) -->
+      <line x1="560" y1="120" x2="560" y2="60" stroke="var(--accent)" stroke-dasharray="3 4"/>
+      <line x1="560" y1="60" x2="660" y2="60" stroke="var(--accent)" stroke-dasharray="3 4" marker-end="url(#i-arr-a)"/>
+      <rect x="660" y="40" width="170" height="40" fill="var(--bg)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="745" y="56" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">router::decide</text>
+      <text x="745" y="71" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">opt-in · llm-router worker</text>
+
+      <!-- branch down: hooks (composable, before + after) -->
+      <line x1="1070" y1="180" x2="1070" y2="230" stroke="var(--accent)" stroke-dasharray="3 4"/>
+      <line x1="1070" y1="230" x2="700" y2="230" stroke="var(--accent)" stroke-dasharray="3 4" marker-end="url(#i-arr-a)"/>
+      <rect x="540" y="220" width="160" height="40" fill="var(--bg)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="620" y="236" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">before / after_tool_call</text>
+      <text x="620" y="251" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">publish_collect · 10s</text>
+
+      <line x1="540" y1="240" x2="490" y2="240" stroke="var(--accent)" stroke-dasharray="3 4"/>
+      <rect x="320" y="220" width="170" height="40" fill="var(--bg)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="405" y="236" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">policy::* subscribers</text>
+      <text x="405" y="251" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">denylist · audit · dlp</text>
+
+      <!-- events back to caller (signal) -->
+      <line x1="325" y1="180" x2="325" y2="295" stroke="var(--signal)" stroke-width="1.4"/>
+      <line x1="325" y1="295" x2="110" y2="295" stroke="var(--signal)" stroke-width="1.4"/>
+      <line x1="110" y1="295" x2="110" y2="180" stroke="var(--signal)" stroke-width="1.4" marker-end="url(#i-arr)"/>
+      <rect x="200" y="280" width="180" height="32" fill="var(--bg)" stroke="var(--signal)" stroke-width="1"/>
+      <text x="290" y="300" font-family="JetBrains Mono, monospace" font-size="10" fill="var(--fg)" font-weight="700" text-anchor="middle">stream agent::events</text>
+
+      <!-- pulse: provider tokens -->
+      <circle r="3.5" fill="var(--signal)">
+        <animateMotion dur="4.5s" repeatCount="indefinite" path="M 110 165 L 240 165 L 410 165 L 560 165 L 660 165 L 730 60 L 660 60 L 560 60 L 660 165 L 810 165 L 910 165 L 1060 165 Z"/>
+      </circle>
+      <!-- pulse: hooks -->
+      <circle r="3.5" fill="var(--accent)">
+        <animateMotion dur="6s" begin="2s" repeatCount="indefinite" path="M 1070 180 L 1070 230 L 700 230 L 540 240 L 405 240 L 540 240 L 700 230 L 1070 230 Z"/>
+      </circle>
+
+      <text x="30" y="325" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--fg-3)">workers/harness-runtime/src/loop_state.rs · publish_collect at register.rs:228 · merge_before/after at hooks.rs:23</text>
+    </svg>
+  </div>
+</section>
+
+<!-- ============== § 04 CORE ============== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-eyebrow"><b>§ 04 · CORE</b> · loop state machine + hook merge</span>
+    <span class="sec-counter">04 / 08</span>
+  </div>
+  <h2 class="sec-h2">The loop is small, deterministic, and runs entirely on the bus.</h2>
+  <p class="sub">run_loop walks an outer loop driven by steering / followup queues, and an inner loop that calls stream_assistant, dispatches tools, and re-enters until no more tool_calls arrive or max_turns is hit. Hook fan-out runs at four points; merge_before and merge_after compose subscriber replies into a single decision.</p>
+
+  <div class="svg-wrap">
+    <svg viewBox="0 0 1240 460" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;">
+      <defs>
+        <marker id="c-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--fg)"/>
+        </marker>
+        <marker id="c-arr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"/>
+        </marker>
+        <marker id="c-arr-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--signal)"/>
+        </marker>
+      </defs>
+
+      <!-- outer loop frame -->
+      <rect x="20" y="20" width="1200" height="380" fill="none" stroke="var(--line-strong)" stroke-dasharray="4 4"/>
+      <text x="36" y="42" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--fg-3)" letter-spacing="2">OUTER · STEERING + FOLLOWUP</text>
+
+      <!-- entry -->
+      <rect x="50" y="60" width="170" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="135" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">drain steering</text>
+      <text x="135" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">pending : AgentMessage[]</text>
+
+      <line x1="220" y1="83" x2="270" y2="83" stroke="var(--fg)" marker-end="url(#c-arr)"/>
+
+      <!-- transform context (composable hook) -->
+      <rect x="270" y="60" width="200" height="46" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1"/>
+      <text x="370" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">transform_context</text>
+      <text x="370" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">publish_collect · 10s deadline</text>
+
+      <line x1="470" y1="83" x2="520" y2="83" stroke="var(--fg)" marker-end="url(#c-arr)"/>
+
+      <!-- abort check -->
+      <rect x="520" y="60" width="160" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="600" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">abort_signal?</text>
+      <text x="600" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">state::get short-circuit</text>
+
+      <line x1="680" y1="83" x2="730" y2="83" stroke="var(--fg)" marker-end="url(#c-arr)"/>
+
+      <!-- stream_assistant -->
+      <rect x="730" y="60" width="200" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1.4"/>
+      <text x="830" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">stream_assistant</text>
+      <text x="830" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">router (opt-in) · provider</text>
+
+      <!-- max_turns gate -->
+      <rect x="980" y="60" width="200" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="1080" y="80" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">max_turns? (default 32)</text>
+      <text x="1080" y="96" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">synthetic stop assistant</text>
+
+      <line x1="930" y1="83" x2="980" y2="83" stroke="var(--fg)" marker-end="url(#c-arr)"/>
+
+      <!-- assistant returns, branch on tool_calls -->
+      <line x1="830" y1="106" x2="830" y2="160" stroke="var(--fg)" marker-end="url(#c-arr)"/>
+      <rect x="730" y="160" width="200" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="830" y="180" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">extract tool_calls</text>
+      <text x="830" y="196" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">stop_reason ≠ Error / Aborted</text>
+
+      <!-- before_tool_call hook -->
+      <line x1="830" y1="206" x2="830" y2="260" stroke="var(--fg)" marker-end="url(#c-arr)"/>
+      <rect x="640" y="260" width="200" height="46" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="740" y="280" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">before_tool_call</text>
+      <text x="740" y="296" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">merge_before · first-blocker-wins</text>
+
+      <line x1="840" y1="283" x2="900" y2="283" stroke="var(--fg)" marker-end="url(#c-arr)"/>
+
+      <!-- dispatch -->
+      <rect x="900" y="260" width="170" height="46" fill="var(--bg-2)" stroke="var(--fg)" stroke-width="1"/>
+      <text x="985" y="280" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">dispatch tool::&lt;n&gt;</text>
+      <text x="985" y="296" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)" text-anchor="middle">or error_result(reason)</text>
+
+      <line x1="1070" y1="283" x2="1130" y2="283" stroke="var(--fg)" marker-end="url(#c-arr)"/>
+
+      <!-- after_tool_call hook -->
+      <rect x="980" y="340" width="200" height="46" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1.4"/>
+      <text x="1080" y="360" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--fg)" font-weight="700" text-anchor="middle">after_tool_call</text>
+      <text x="1080" y="376" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--accent)" text-anchor="middle">merge_after · field-by-field</text>
+
+      <line x1="985" y1="306" x2="985" y2="340" stroke="var(--fg)" marker-end="url(#c-arr)"/>
+
+      <!-- loop back -->
+      <line x1="980" y1="363" x2="40" y2="363" stroke="var(--fg)" stroke-dasharray="3 4"/>
+      <line x1="40" y1="363" x2="40" y2="83" stroke="var(--fg)" stroke-dasharray="3 4"/>
+      <line x1="40" y1="83" x2="50" y2="83" stroke="var(--fg)" stroke-dasharray="3 4" marker-end="url(#c-arr)"/>
+      <text x="55" y="358" font-family="JetBrains Mono, monospace" font-size="9" fill="var(--fg-3)">while has_more_tool_calls or pending</text>
+
+      <!-- caption -->
+      <text x="36" y="430" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--fg-3)">workers/harness-runtime/src/loop_state.rs:64 · hooks.rs:23 (merge_before) · hooks.rs:47 (merge_after) · hooks.rs:74 (decode_transform)</text>
+
+      <!-- pulse along the inner loop -->
+      <circle r="3.5" fill="var(--signal)">
+        <animateMotion dur="9s" repeatCount="indefinite" path="M 135 83 L 370 83 L 600 83 L 830 83 L 830 180 L 740 283 L 985 283 L 1080 363 L 40 363 L 40 83 Z"/>
+      </circle>
+    </svg>
+  </div>
+
+  <div class="formula">
+    <div class="name">Hook fan-out · publish_collect (workaround for missing publish_collect primitive in iii-sdk 0.11.x)</div>
+    <div class="expr">
+      replies <span class="op">=</span> stream::list<span class="op">(</span>name<span class="op">=</span>agent::hook_reply, group_id<span class="op">=</span>event_id<span class="op">)</span>
+      <br>
+      while now <span class="op">&lt;</span> deadline · poll every <span class="v">25 ms</span> · deadline <span class="op">=</span> <span class="v">10 000 ms</span>
+      <br>
+      decision <span class="op">=</span> merge_before<span class="op">(</span>replies<span class="op">)</span> <span class="op">|</span> merge_after<span class="op">(</span>result, replies<span class="op">)</span> <span class="op">|</span> decode_transform<span class="op">(</span>last reply<span class="op">)</span>
+    </div>
+    <div class="where">
+      <code>DEFAULT_HOOK_TIMEOUT_MS = 10_000</code> (was 5_000 until v0.11.9). <code>event_id</code> is uuid v4 minted per fan-out. Source: <code>workers/harness-runtime/src/register.rs:63</code>, <code>workers/harness-runtime/src/register.rs:228</code>.
+    </div>
+  </div>
+
+  <div class="scroll-x" style="margin-top:22px;">
+    <table class="data">
+      <thead>
+        <tr><th>Hook topic</th><th>Reply shape</th><th>Merge rule</th><th>Live e2e</th><th class="num-col">Same-process</th><th class="num-col">Cross-process</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>agent::before_tool_call</td><td>{ block: bool, reason: str }</td><td>first-blocker-wins</td><td>policy_denylist_blocks_tool_dispatch</td><td class="num-col sig">✓</td><td class="num-col sig">✓ (v0.11.9)</td></tr>
+        <tr><td>agent::after_tool_call</td><td>partial ToolResult · content / details / terminate</td><td>field-by-field</td><td>audit_log + dlp_scrubber</td><td class="num-col sig">✓</td><td class="num-col sig">✓</td></tr>
+        <tr><td>agent::transform_context</td><td>{ messages: AgentMessage[] } | bare array</td><td>last reply wins</td><td>transform_context_subscriber</td><td class="num-col sig">✓</td><td class="num-col sig">✓</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============== § 05 STATE ============== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-eyebrow"><b>§ 05 · STATE</b> · KV scopes + streams</span>
+    <span class="sec-counter">05 / 08</span>
+  </div>
+  <h2 class="sec-h2">All durable state lives in iii state KV. No private databases.</h2>
+  <p class="sub">harness writes to one of three scopes (agent, models, llm-router when present). Sessions persist via session-tree. Two named streams carry per-session events and per-event hook replies. Every key is a string, every value is JSON.</p>
+
+  <div class="scroll-x">
+    <table class="data">
+      <thead>
+        <tr><th>Scope</th><th>Key pattern</th><th>Value shape</th><th>Owner</th><th class="num-col">Source</th></tr>
+      </thead>
+      <tbody>
+        <tr class="group"><td colspan="5">scope: agent · <span class="sig">built-in</span></td></tr>
+        <tr><td>agent</td><td>session/&lt;id&gt;/steering</td><td>AgentMessage[]</td><td>run_loop · push_steering</td><td class="num-col dim">register.rs:191</td></tr>
+        <tr><td>agent</td><td>session/&lt;id&gt;/followup</td><td>AgentMessage[]</td><td>run_loop · push_followup</td><td class="num-col dim">register.rs:191</td></tr>
+        <tr><td>agent</td><td>session/&lt;id&gt;/abort_signal</td><td>bool</td><td>agent::abort</td><td class="num-col dim">register.rs:191</td></tr>
+        <tr><td>agent</td><td>routing_log:&lt;ts&gt;:&lt;request_id&gt;</td><td>RoutingLogEntry</td><td>llm-router via decide.rs</td><td class="num-col dim">llm-router/functions/decide.rs</td></tr>
+
+        <tr class="group"><td colspan="5">scope: models · <span class="sig">state-first since v0.11.8</span></td></tr>
+        <tr><td>models</td><td>models:&lt;provider&gt;:&lt;id&gt;</td><td>Model · capabilities + pricing</td><td>models::register</td><td class="num-col dim">models-catalog/src/lib.rs:120</td></tr>
+
+        <tr class="group"><td colspan="5">scope: llm-router · <span class="acc">composable, opt-in</span></td></tr>
+        <tr><td>llm-router</td><td>policies:&lt;id&gt;</td><td>Policy · match-rule + action</td><td>router::policy_create</td><td class="num-col dim">iii-hq/workers/llm-router</td></tr>
+        <tr><td>llm-router</td><td>models:&lt;id&gt;</td><td>ModelRegistration</td><td>router::model_register</td><td class="num-col dim">iii-hq/workers/llm-router</td></tr>
+        <tr><td>llm-router</td><td>model_health:&lt;id&gt;</td><td>ModelHealth · latency · error_rate</td><td>router::health_update</td><td class="num-col dim">iii-hq/workers/llm-router</td></tr>
+        <tr><td>llm-router</td><td>classifier:&lt;id&gt;</td><td>ClassifierConfig · thresholds</td><td>router::classifier_config</td><td class="num-col dim">iii-hq/workers/llm-router</td></tr>
+        <tr><td>llm-router</td><td>ab_tests:&lt;id&gt;</td><td>AbTest · variants + status</td><td>router::ab_create</td><td class="num-col dim">iii-hq/workers/llm-router</td></tr>
+
+        <tr class="group"><td colspan="5">streams · per-event message bus</td></tr>
+        <tr><td>stream</td><td>agent::events / &lt;session_id&gt;</td><td>AgentEvent · 11 variants</td><td>IiiSink::emit (run_loop)</td><td class="num-col dim">register.rs:415</td></tr>
+        <tr><td>stream</td><td>agent::hook_reply / &lt;event_id&gt;</td><td>subscriber reply payload</td><td>each subscriber via stream::set</td><td class="num-col dim">policy-subscribers/src/lib.rs:200</td></tr>
+
+        <tr class="group"><td colspan="5">durable transcripts · session-tree worker</td></tr>
+        <tr><td>session-tree</td><td>session/&lt;id&gt; · entries · child links</td><td>SessionEntry: Message / Compaction / BranchSummary</td><td>session::create / append</td><td class="num-col dim">workers/session-tree</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============== § 06 TIERS ============== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-eyebrow"><b>§ 06 · TIERS</b> · composability ladder</span>
+    <span class="sec-counter">06 / 08</span>
+  </div>
+  <h2 class="sec-h2">Each tier adds one worker. Harness code never changes.</h2>
+  <p class="sub">The README composability ladder is a real cascade: same binary, same flags, same loop. Adding capability is a separate process registering a separate function. The agent loop discovers it on next probe.</p>
+
+  <div class="svg-wrap">
+    <svg viewBox="0 0 1240 280" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block;">
+      <defs>
+        <marker id="t-arr-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--signal)"/>
+        </marker>
+      </defs>
+      <line x1="40" y1="140" x2="1200" y2="140" stroke="var(--signal)" stroke-width="1.4" marker-end="url(#t-arr-s)"/>
+      <circle cx="40" cy="140" r="4" fill="var(--signal)"/>
+      <circle cx="280" cy="140" r="4" fill="var(--signal)"/>
+      <circle cx="520" cy="140" r="4" fill="var(--signal)"/>
+      <circle cx="760" cy="140" r="4" fill="var(--signal)"/>
+      <circle cx="1000" cy="140" r="4" fill="var(--signal)"/>
+
+      <!-- tier labels -->
+      <g font-family="JetBrains Mono, monospace" font-size="10.5">
+        <text x="40" y="100" fill="var(--fg-3)" letter-spacing="1.5">TIER 1</text>
+        <text x="40" y="118" fill="var(--fg)" font-weight="700">baseline</text>
+        <text x="40" y="172" fill="var(--fg-3)">harness · default</text>
+        <text x="40" y="186" fill="var(--fg-3)">tool::bash → host shell</text>
+        <text x="40" y="200" fill="var(--fg-3)">no extra worker</text>
+
+        <text x="280" y="100" fill="var(--fg-3)" letter-spacing="1.5">TIER 2</text>
+        <text x="280" y="118" fill="var(--fg)" font-weight="700">+ sandbox</text>
+        <text x="280" y="172" fill="var(--accent)">iii worker add sandbox</text>
+        <text x="280" y="186" fill="var(--fg-3)">tool::bash → sandbox::exec</text>
+        <text x="280" y="200" fill="var(--fg-3)">microVM isolation</text>
+
+        <text x="520" y="100" fill="var(--fg-3)" letter-spacing="1.5">TIER 3</text>
+        <text x="520" y="118" fill="var(--fg)" font-weight="700">+ llm-router</text>
+        <text x="520" y="172" fill="var(--accent)">cargo run -p iii-llm-router</text>
+        <text x="520" y="186" fill="var(--fg-3)">stream_assistant calls router::decide</text>
+        <text x="520" y="200" fill="var(--fg-3)">policy + classifier + AB</text>
+
+        <text x="760" y="100" fill="var(--fg-3)" letter-spacing="1.5">TIER 4</text>
+        <text x="760" y="118" fill="var(--fg)" font-weight="700">+ policy</text>
+        <text x="760" y="172" fill="var(--accent)">policy-denylist · audit-log · dlp</text>
+        <text x="760" y="186" fill="var(--fg-3)">before / after_tool_call subscribers</text>
+        <text x="760" y="200" fill="var(--fg-3)">cross-process verified</text>
+
+        <text x="1000" y="100" fill="var(--fg-3)" letter-spacing="1.5">TIER 5</text>
+        <text x="1000" y="118" fill="var(--fg)" font-weight="700">+ recursion + xform</text>
+        <text x="1000" y="172" fill="var(--fg-3)">tool::run_subagent · depth ≤ 3</text>
+        <text x="1000" y="186" fill="var(--fg-3)">transform_context subscribers</text>
+        <text x="1000" y="200" fill="var(--fg-3)">in-tree, opt-in via tool list</text>
+      </g>
+
+      <!-- pulse along the cascade -->
+      <circle r="4" fill="var(--accent)">
+        <animateMotion dur="6s" repeatCount="indefinite" path="M 40 140 L 1200 140"/>
+      </circle>
+
+      <text x="40" y="250" font-family="JetBrains Mono, monospace" font-size="9.5" fill="var(--fg-3)">README.md:53 · workers/policy-subscribers (binaries) · workers/harness-runtime/src/register.rs (tool::run_subagent at 1023)</text>
+    </svg>
+  </div>
+
+  <div class="scroll-x" style="margin-top:22px;">
+    <table class="data">
+      <thead>
+        <tr><th>Tier</th><th>Producer</th><th>Trigger added</th><th>Function added</th><th class="num-col">Latency cost</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><b>1</b> baseline</td><td>harness-runtime</td><td>none beyond default</td><td>12 agent · 8 tool</td><td class="num-col sig">0 ms</td></tr>
+        <tr><td><b>2</b> sandbox</td><td>iii-sandbox worker</td><td>default trigger</td><td>sandbox::exec, sandbox::create</td><td class="num-col">~50–200 ms / call</td></tr>
+        <tr><td><b>3</b> router</td><td>iii-hq/workers/llm-router</td><td>default trigger</td><td>router::decide + 17 more</td><td class="num-col">~10–40 ms / turn</td></tr>
+        <tr><td><b>4</b> policy</td><td>policy-subscribers binaries</td><td>subscribe agent::before/after_tool_call</td><td>policy::denylist, audit_log, dlp_scrubber</td><td class="num-col acc">≤ 10 s deadline</td></tr>
+        <tr><td><b>5</b> recursion</td><td>harness-runtime (in-tree)</td><td>default trigger</td><td>tool::run_subagent (cap 600 s)</td><td class="num-col">child-loop bound</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============== § 07 SURFACES ============== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-eyebrow"><b>§ 07 · SURFACES</b> · external interfaces</span>
+    <span class="sec-counter">07 / 08</span>
+  </div>
+  <h2 class="sec-h2">Three binaries, one HTTP suite, one events stream.</h2>
+  <p class="sub">Everything end-users touch maps to one of four surfaces. CLI for one-shots, TUI for interactive, harnessd for persistent deployments, HTTP for external dispatchers. Every surface is the same iii bus underneath.</p>
+
+  <div class="surfaces">
+    <div class="surface-card">
+      <div class="lbl">Surface · 01</div>
+      <div class="nm"><span class="acc">harness</span> · CLI</div>
+      <ul>
+        <li>one-shot driver</li>
+        <li>22 providers selectable</li>
+        <li>--json machine output</li>
+        <li>--version, --max-turns</li>
+        <li>HARNESS_ENGINE_URL env</li>
+        <li>--experimental-providers</li>
+      </ul>
+    </div>
+    <div class="surface-card">
+      <div class="lbl">Surface · 02</div>
+      <div class="nm"><span class="acc">harness-tui</span> · ratatui</div>
+      <ul>
+        <li>interactive loop</li>
+        <li>/tree · /hotkeys overlays</li>
+        <li>themes · keybinds reload</li>
+        <li>kitty / iTerm2 inline image</li>
+        <li>clipboard image paste</li>
+        <li>insta render snapshots · 6</li>
+      </ul>
+    </div>
+    <div class="surface-card">
+      <div class="lbl">Surface · 03</div>
+      <div class="nm"><span class="acc">harnessd</span> · daemon</div>
+      <ul>
+        <li>serve · all workers</li>
+        <li>status · 346 fns probed</li>
+        <li>--providers all | csv</li>
+        <li>--with-hook-example</li>
+        <li>persistent registration</li>
+        <li>multi-client safe</li>
+      </ul>
+    </div>
+    <div class="surface-card">
+      <div class="lbl">Surface · 04</div>
+      <div class="nm"><span class="acc">HTTP</span> · iii bridge</div>
+      <ul>
+        <li>POST /agent/prompt → run_loop</li>
+        <li>POST /agent/&lt;id&gt;/steer</li>
+        <li>POST /agent/&lt;id&gt;/follow_up</li>
+        <li>POST /agent/&lt;id&gt;/abort</li>
+        <li>session::* HTTP routes</li>
+        <li>auth via iii-http</li>
+      </ul>
+    </div>
+    <div class="surface-card">
+      <div class="lbl">Surface · 05</div>
+      <div class="nm">events stream</div>
+      <ul>
+        <li>agent::events / &lt;session_id&gt;</li>
+        <li>11 AgentEvent variants</li>
+        <li>200 ms poll floor</li>
+        <li>stream:join trigger pending</li>
+        <li>--json line-per-event</li>
+        <li>final summary blob</li>
+      </ul>
+    </div>
+    <div class="surface-card">
+      <div class="lbl">Surface · 06</div>
+      <div class="nm">install path</div>
+      <ul>
+        <li>curl install.sh | sh</li>
+        <li>bootstraps rustup</li>
+        <li>~/.harness/repo clone</li>
+        <li>~/.local/bin symlinks</li>
+        <li>HARNESS_BRANCH override</li>
+        <li>HARNESS_SKIP_III=1 / SKIP_RUSTUP=1</li>
+      </ul>
+    </div>
+    <div class="surface-card">
+      <div class="lbl">Surface · 07</div>
+      <div class="nm">test surface</div>
+      <ul>
+        <li>41 lib test crates</li>
+        <li>10 e2e (gated, real engine)</li>
+        <li>6 TUI render snapshots</li>
+        <li>4 upstream PRs · 3 merged</li>
+        <li>cargo insta · re-bless</li>
+        <li>IIIX_TEST_ENGINE_URL gate</li>
+      </ul>
+    </div>
+    <div class="surface-card">
+      <div class="lbl">Surface · 08</div>
+      <div class="nm">version surface</div>
+      <ul>
+        <li>v0.11.10 (current)</li>
+        <li>tags v0.11.4 → v0.11.10</li>
+        <li>workspace versioning</li>
+        <li>iii-sdk pinned 0.11</li>
+        <li>Apache-2.0</li>
+        <li>0.x until prod-proven</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============== § 08 BOOT ============== -->
+<section>
+  <div class="sec-head">
+    <span class="sec-eyebrow"><b>§ 08 · BOOT</b> · annotated startup</span>
+    <span class="sec-counter">08 / 08</span>
+  </div>
+  <h2 class="sec-h2">Starting harness from scratch. Numbers trace to the boot log.</h2>
+  <p class="sub">Two processes, one bus. iii engine listens on port 49134 for workers and 3111 for HTTP, 3112 for streams. harness-cli opens a single websocket, registers ~40 functions, dispatches one trigger, prints events.</p>
+
+  <pre class="boot"><span class="c"># 1. install (~90s on a fresh machine)</span>
+<span class="d">$</span> curl <span class="d">-fsSL</span> https://raw.githubusercontent.com/iii-experimental/harness/main/install.sh <span class="d">|</span> sh
+<span class="a">[harness install]</span> iii engine already installed at /Users/&lt;you&gt;/.local/bin/iii
+<span class="a">[harness install]</span> updating /Users/&lt;you&gt;/.harness/repo
+<span class="a">[harness install]</span> building harness, harness-tui, harnessd <span class="c">(release mode)</span>
+<span class="a">[harness install]</span> linked harness     → /Users/&lt;you&gt;/.local/bin/harness
+<span class="a">[harness install]</span> linked harness-tui → /Users/&lt;you&gt;/.local/bin/harness-tui
+<span class="a">[harness install]</span> linked harnessd    → /Users/&lt;you&gt;/.local/bin/harnessd
+<span class="a">[harness install]</span> done.
+
+<span class="c"># 2. boot iii engine</span>
+<span class="d">$</span> iii --use-default-config &amp;
+<span class="d">[INFO]</span> iii engine listening on
+       ws://127.0.0.1:<span class="t">49134</span>   <span class="c"># worker bus (websocket)</span>
+       http://127.0.0.1:<span class="t">3111</span>    <span class="c"># REST surface</span>
+       http://127.0.0.1:<span class="t">3112</span>    <span class="c"># stream surface</span>
+<span class="d">[INFO]</span> registered <span class="t">68</span> built-in functions <span class="c"># state::* stream::* publish etc.</span>
+
+<span class="c"># 3. one-shot smoke (zero-config faux path)</span>
+<span class="d">$</span> harness <span class="d">--provider</span> faux <span class="d">--model</span> echo <span class="d">"say hi"</span>
+<span class="s">[agent_start]</span>
+&gt;&gt;&gt; user: say hi
+
+<span class="s">[turn_start]</span>
+&lt;&lt;&lt; assistant: hello from faux <span class="c">— this is the harness zero-config smoke path.</span>
+<span class="s">[turn_end]</span>
+<span class="s">[agent_end]</span> 2 messages total
+
+=== summary ===
+turns: <span class="t">1</span>
+messages: <span class="t">2</span>
+last_stop_reason: End
+
+<span class="c"># 4. real provider with anthropic key</span>
+<span class="d">$</span> export ANTHROPIC_API_KEY=sk-ant-...
+<span class="d">$</span> harness <span class="d">"summarise this repo and list workspace crates using ls"</span>
+<span class="s">[agent_start]</span>
+&gt;&gt;&gt; user: summarise this repo ...
+<span class="s">[turn_start]</span>
+    -&gt; tool call: ls<span class="d">(</span>{<span class="d">"</span>path<span class="d">":"</span>workers<span class="d">"}</span>)
+    [ls result ok] <span class="t">44</span> entries
+<span class="s">[turn_end]</span> 1 tool result(s)
+<span class="s">[turn_start]</span>
+&lt;&lt;&lt; assistant: This is harness, a single-agent loop ...
+<span class="s">[turn_end]</span>
+<span class="s">[agent_end]</span> <span class="t">4</span> messages total
+
+<span class="c"># 5. add a worker — composability lives here</span>
+<span class="d">$</span> ./policy-denylist <span class="d">--deny</span> <span class="d">"</span>bash<span class="d">"</span> &amp;
+<span class="d">[INFO]</span> policy-denylist active on ws://127.0.0.1:49134; denylist=[bash]
+<span class="d">$</span> harness <span class="d">"</span>use bash to run uname -a then say done<span class="d">"</span>
+&lt;&lt;&lt; assistant: <span class="a">I see that the bash command is blocked by policy.</span>
+<span class="s">[agent_end]</span> <span class="t">4</span> messages total · turns: <span class="t">2</span>
+<span class="c"># no harness code change. add a worker, get a feature.</span></pre>
+
+  <div style="margin-top:24px;" class="scroll-x">
+    <table class="data">
+      <thead>
+        <tr><th>Port</th><th>Protocol</th><th>Surface</th><th>Owner</th><th class="num-col">Configurable</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>49134</td><td>WebSocket</td><td>worker bus · iii-sdk default</td><td>iii engine</td><td class="num-col">--engine-url · HARNESS_ENGINE_URL</td></tr>
+        <tr><td>3111</td><td>HTTP</td><td>REST surface for HTTP triggers</td><td>iii engine</td><td class="num-col">iii config.yaml</td></tr>
+        <tr><td>3112</td><td>HTTP</td><td>stream surface</td><td>iii engine</td><td class="num-col">iii config.yaml</td></tr>
+        <tr><td>49135</td><td>WebSocket</td><td>browser RBAC bus (iii-browser-sdk)</td><td>iii engine · optional</td><td class="num-col">unused by harness today</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============== FOOTER ============== -->
+<footer>
+  <div class="refs">
+    <div class="col">
+      <div class="lbl">Canonical files</div>
+      <ul>
+        <li>→ <b>workers/harness-runtime/src/register.rs</b></li>
+        <li>→ <b>workers/harness-runtime/src/loop_state.rs</b></li>
+        <li>→ <b>workers/harness-runtime/src/hooks.rs</b></li>
+        <li>→ <b>workers/harness-cli/src/main.rs</b></li>
+        <li>→ <b>workers/harness-tui/src/main.rs</b></li>
+        <li>→ <b>workers/harnessd/src/main.rs</b></li>
+        <li>→ <b>workers/policy-subscribers/src/lib.rs</b></li>
+        <li>→ <b>workers/models-catalog/src/lib.rs</b></li>
+        <li>→ <b>workers/replay-test/tests/end_to_end.rs</b></li>
+        <li>→ <b>install.sh</b> · <b>CHANGELOG.md</b> · <b>README.md</b></li>
+      </ul>
+    </div>
+    <div class="col">
+      <div class="lbl">Env flags · CLI overrides</div>
+      <ul>
+        <li>· HARNESS_ENGINE_URL</li>
+        <li>· HARNESS_REPO_DIR</li>
+        <li>· HARNESS_BIN_DIR</li>
+        <li>· HARNESS_BRANCH</li>
+        <li>· HARNESS_SKIP_III</li>
+        <li>· HARNESS_SKIP_RUSTUP</li>
+        <li>· IIIX_TEST_ENGINE_URL · e2e gate</li>
+        <li>· INSTA_UPDATE · TUI snapshot rebless</li>
+        <li>· RUST_LOG · tracing filter</li>
+        <li>· &lt;PROVIDER&gt;_API_KEY · per provider</li>
+      </ul>
+    </div>
+    <div class="col">
+      <div class="lbl">Runtime counters</div>
+      <ul>
+        <li>· workers · <b>44</b></li>
+        <li>· iii functions · ~<b>120</b></li>
+        <li>· agent · <b>12</b></li>
+        <li>· tool · <b>8</b></li>
+        <li>· provider · <b>22</b> (15 verified · 7 gated)</li>
+        <li>· oauth flows · <b>5</b> × 3 fns</li>
+        <li>· hook topics · <b>3</b></li>
+        <li>· lib test crates · <b>41</b></li>
+        <li>· e2e tests · <b>10</b> live-green</li>
+        <li>· TUI snapshots · <b>6</b></li>
+        <li>· upstream PRs · <b>4</b> (3 merged)</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="colophon">
+    <span>harness · v0.11.10 · system reference</span>
+    <span><a href="#">↑ top</a> · <a href="https://github.com/iii-experimental/harness">github →</a></span>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  const order = ['cream', 'dark', 'light'];
+  const root = document.documentElement;
+  const btn = document.getElementById('theme-cycle');
+  const stored = localStorage.getItem('harness-theme');
+  if (stored && order.includes(stored)) root.dataset.theme = stored;
+  btn.textContent = 'theme · ' + root.dataset.theme;
+  btn.addEventListener('click', () => {
+    const idx = order.indexOf(root.dataset.theme);
+    const next = order[(idx + 1) % order.length];
+    root.dataset.theme = next;
+    localStorage.setItem('harness-theme', next);
+    btn.textContent = 'theme · ' + next;
+  });
+})();
+</script>
+</body>
+</html>

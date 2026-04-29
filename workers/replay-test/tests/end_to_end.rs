@@ -878,3 +878,94 @@ async fn oauth_anthropic_register_smoke() -> anyhow::Result<()> {
     refs.unregister_all();
     Ok(())
 }
+
+/// Models catalog: state-first round-trip. Registers `models::*`, calls
+/// `models::register` with a custom Model, then `models::get` and asserts
+/// the value comes back from state — proving the embedded baseline is no
+/// longer the source of truth and any caller can extend the catalog at
+/// runtime without touching the crate.
+#[tokio::test]
+#[serial_test::serial]
+async fn models_catalog_state_register_round_trip() -> anyhow::Result<()> {
+    let Some(engine_url) = std::env::var("IIIX_TEST_ENGINE_URL").ok() else {
+        eprintln!("skipping: set IIIX_TEST_ENGINE_URL to a running iii engine");
+        return Ok(());
+    };
+
+    let iii = register_worker(&engine_url, InitOptions::default());
+    iii.list_functions().await.expect("engine reachable");
+    let refs = models_catalog::register_with_iii(&iii).await?;
+
+    let custom_id = format!("test-model-{}", chrono::Utc::now().timestamp_millis());
+    let custom_provider = "ephemeral-test-provider";
+    let model = json!({
+        "id": custom_id,
+        "provider": custom_provider,
+        "api": "chat-completions",
+        "display_name": "Test Custom",
+        "context_window": 12345,
+        "supports_thinking": true,
+        "supports_tools": true,
+        "transports": [],
+    });
+
+    let reg_resp: Value = iii
+        .trigger(TriggerRequest {
+            function_id: "models::register".to_string(),
+            payload: model.clone(),
+            action: None,
+            timeout_ms: Some(15_000),
+        })
+        .await
+        .expect("models::register reachable");
+    assert_eq!(
+        reg_resp.get("registered").and_then(Value::as_bool),
+        Some(true),
+        "models::register did not confirm; resp: {reg_resp:?}"
+    );
+
+    let get_resp: Value = iii
+        .trigger(TriggerRequest {
+            function_id: "models::get".to_string(),
+            payload: json!({
+                "provider": custom_provider,
+                "model_id": custom_id,
+            }),
+            action: None,
+            timeout_ms: Some(15_000),
+        })
+        .await
+        .expect("models::get reachable");
+    assert_eq!(
+        get_resp.get("id").and_then(Value::as_str),
+        Some(custom_id.as_str()),
+        "models::get did not return the registered model: {get_resp:?}"
+    );
+    assert_eq!(
+        get_resp.get("context_window").and_then(Value::as_u64),
+        Some(12345),
+        "context_window did not round-trip: {get_resp:?}"
+    );
+
+    let supports_resp: Value = iii
+        .trigger(TriggerRequest {
+            function_id: "models::supports".to_string(),
+            payload: json!({
+                "provider": custom_provider,
+                "model_id": custom_id,
+                "capability": "thinking",
+            }),
+            action: None,
+            timeout_ms: Some(15_000),
+        })
+        .await
+        .expect("models::supports reachable");
+    assert_eq!(
+        supports_resp.get("supported").and_then(Value::as_bool),
+        Some(true),
+        "models::supports did not see the registered capability: {supports_resp:?}"
+    );
+
+    refs.unregister_all();
+    Ok(())
+}

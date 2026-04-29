@@ -27,6 +27,7 @@ harness-types = { path = "../harness-types" }
 policy-subscribers = { path = "../policy-subscribers" }
 hook-example = { path = "../hook-example" }
 oauth-anthropic = { path = "../oauth-anthropic" }
+models-catalog = { path = "../models-catalog" }
 chrono = { workspace = true }
 serial_test = "3"
 tempfile = "3"

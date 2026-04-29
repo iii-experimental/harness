@@ -2,9 +2,10 @@
 
 Single-agent loop runtime on [iii-engine](https://iii.dev). 44 narrow workers, all iii-first.
 
-> Status: 0.11.7, 0.x experimental. API surface unstable until production-proven.
-> Live-validated: 9 e2e tests against a real iii engine, 41 lib test crates,
-> 2 TUI render snapshots, 32 upstream tests on the llm-router PR.
+> Status: 0.11.8, 0.x experimental. API surface unstable until production-proven.
+> Live-validated: 10 e2e tests against a real iii engine, 41 lib test crates,
+> 6 TUI render snapshots. llm-router `provider` field landed upstream
+> (iii-hq/workers PR #57, merged 2026-04-29).
 
 ## Install
 
@@ -58,8 +59,8 @@ iii worker add llm-router
 # → When present, harness extracts the last user prompt + routing hints,
 #   calls router::decide (RoutingRequest -> RoutingDecision), and dispatches
 #   to the routed provider/model. Provider derivation: response.provider
-#   field if present (iii-hq/workers#57), else split on '/' for namespaced
-#   model ids, else fall back to the caller's hint.
+#   field (shipped in llm-router via iii-hq/workers PR #57, merged), else
+#   split on '/' for namespaced model ids, else fall back to caller hint.
 # → When llm-router isn't on the bus, harness dispatches directly. No flag.
 
 # Tier 4 — policy enforcement (denylist + audit + DLP)
@@ -282,8 +283,9 @@ When `session-tree` is registered, `agent::run_loop` automatically hydrates from
 - `auth::get_token`, `auth::set_token`, `auth::delete_token` — credential vault
 - `auth::list_providers`, `auth::status`
 
-### `models::*` (3)
-- `models::list`, `models::get`, `models::supports` — model capability catalog
+### `models::*` (4)
+- `models::list`, `models::get`, `models::supports` — state-first model capability catalog
+- `models::register` — write a Model to state under `models:<provider>:<id>` (state is the source of truth; embedded `data/models.json` is a one-time seed used only when state is empty)
 
 ### `corpus::*` (4)
 - `corpus::scan`, `corpus::redact`, `corpus::review`, `corpus::publish` — session corpus pipeline
@@ -387,6 +389,7 @@ Nine gated e2e tests cover the bus-mediated paths the unit tests can't:
 | `transform_context_subscriber_mutates_messages` | the third hook topic rewrites the in-flight messages array |
 | `run_subagent_refuses_at_depth_limit` | sub-agent depth-3 cap fires before nested run_loop spawn |
 | `oauth_anthropic_register_smoke` | oauth-anthropic registers `login/refresh/status` and `status` is callable |
+| `models_catalog_state_register_round_trip` | `models::register` writes a custom Model to state; `models::get` and `models::supports` see it — proves state-first registry, not the embedded baseline |
 
 TUI snapshots render `App` against a `TestBackend` at fixed dimensions, capture the trimmed cell buffer (style discarded for stability), and diff via `insta`. Re-bless with `cargo insta test -p harness-tui --review`.
 
@@ -408,7 +411,9 @@ Both `harness-cli` and `harness-tui` are iii-first thin invokers as of v0.8. Hoo
 | max_turns enforcement | ✅ shipped |
 | Provider workers compiled + registered | 22/22 (15 verified, 7 gated) |
 | OAuth flows | 5 registered, 1 e2e smoke |
-| TUI snapshot tests | ✅ 2 |
+| Models-catalog: state-first | ✅ shipped + e2e |
+| TUI snapshot tests | ✅ 6 (idle, after-message, running+tool-call, tool-end, error, wide) |
+| llm-router `provider` field upstream | ✅ merged (iii-hq/workers#57) |
 
 ### Behaviour fixed since v0.11.0 you may not notice
 

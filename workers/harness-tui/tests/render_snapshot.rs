@@ -18,7 +18,8 @@ use std::sync::Arc;
 use harness_tui::app::{App, RuntimeHandle};
 use harness_tui::render::{draw, PostDrawEscapes};
 use harness_types::{
-    AgentEvent, AgentMessage, AssistantMessage, ContentBlock, StopReason, TextContent, UserMessage,
+    AgentEvent, AgentMessage, AssistantMessage, ContentBlock, StopReason, TextContent, ToolResult,
+    UserMessage,
 };
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -107,4 +108,92 @@ fn after_user_and_assistant_message() {
     app.apply_event(AgentEvent::AgentEnd { messages: vec![] });
     let rendered = render_to_string(&app, 80, 20);
     insta::assert_snapshot!("after_user_assistant_80x20", rendered);
+}
+
+#[test]
+fn running_status_with_tool_call() {
+    let mut app = make_app();
+    app.apply_event(AgentEvent::AgentStart);
+    app.apply_event(AgentEvent::TurnStart);
+    app.apply_event(AgentEvent::MessageStart {
+        message: AgentMessage::User(UserMessage {
+            content: vec![ContentBlock::Text(TextContent {
+                text: "list .rs files".into(),
+            })],
+            timestamp: 0,
+        }),
+    });
+    app.apply_event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "tc-1".into(),
+        tool_name: "ls".into(),
+        args: serde_json::json!({ "path": "workers" }),
+    });
+    let rendered = render_to_string(&app, 80, 22);
+    insta::assert_snapshot!("running_with_tool_call_80x22", rendered);
+}
+
+#[test]
+fn tool_execution_end_with_result() {
+    let mut app = make_app();
+    app.apply_event(AgentEvent::AgentStart);
+    app.apply_event(AgentEvent::TurnStart);
+    app.apply_event(AgentEvent::ToolExecutionStart {
+        tool_call_id: "tc-2".into(),
+        tool_name: "bash".into(),
+        args: serde_json::json!({ "command": "uname -a" }),
+    });
+    app.apply_event(AgentEvent::ToolExecutionEnd {
+        tool_call_id: "tc-2".into(),
+        tool_name: "bash".into(),
+        result: ToolResult {
+            content: vec![ContentBlock::Text(TextContent {
+                text: "Darwin arm64".into(),
+            })],
+            details: serde_json::json!({ "exit_code": 0, "via": "host" }),
+            terminate: false,
+        },
+        is_error: false,
+    });
+    let rendered = render_to_string(&app, 80, 22);
+    insta::assert_snapshot!("tool_execution_end_80x22", rendered);
+}
+
+#[test]
+fn assistant_error_state() {
+    let mut app = make_app();
+    app.apply_event(AgentEvent::AgentStart);
+    app.apply_event(AgentEvent::MessageStart {
+        message: AgentMessage::Assistant(AssistantMessage {
+            content: vec![ContentBlock::Text(TextContent {
+                text: "API key invalid".into(),
+            })],
+            stop_reason: StopReason::Error,
+            error_message: Some("auth failed".into()),
+            error_kind: None,
+            usage: None,
+            model: "claude-sonnet".into(),
+            provider: "anthropic".into(),
+            timestamp: 0,
+        }),
+    });
+    app.apply_event(AgentEvent::AgentEnd { messages: vec![] });
+    let rendered = render_to_string(&app, 80, 20);
+    insta::assert_snapshot!("assistant_error_80x20", rendered);
+}
+
+#[test]
+fn wide_terminal_layout() {
+    let mut app = make_app();
+    app.apply_event(AgentEvent::AgentStart);
+    app.apply_event(AgentEvent::MessageStart {
+        message: AgentMessage::User(UserMessage {
+            content: vec![ContentBlock::Text(TextContent {
+                text: "wide screen test".into(),
+            })],
+            timestamp: 0,
+        }),
+    });
+    app.apply_event(AgentEvent::AgentEnd { messages: vec![] });
+    let rendered = render_to_string(&app, 120, 30);
+    insta::assert_snapshot!("wide_120x30", rendered);
 }

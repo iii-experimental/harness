@@ -1,14 +1,32 @@
 //! Model capabilities knowledge base.
 //!
-//! Embeds a baseline `models.json` at compile time. Functions answer
-//! capability queries used by router workers, harness UI selectors, and
-//! provider workers needing model-shape facts.
+//! State-first model registry. The bus is the source of truth: each model
+//! is stored under `models:<provider>:<id>` in scope `models`, and the
+//! `models::list` / `models::get` / `models::supports` iii functions read
+//! from there. A new `models::register` iii function lets any caller
+//! (router, registry sync worker, user CLI) write models without touching
+//! this crate.
+//!
+//! The compiled-in `data/models.json` is now used **only** as a one-time
+//! seed: when `register_with_iii` runs and state is empty, it bulk-loads
+//! the embedded baseline so existing setups keep working zero-config.
+//! Subsequent registrations win — the embedded copy is never consulted
+//! once state has at least one entry.
+//!
+//! Sync `pub fn list/get/supports` still query the embedded baseline for
+//! callers that can't await a bus round-trip (e.g. `context-compaction`'s
+//! `CompactionConfig::new`); they're documented as best-effort fallbacks.
 
 use harness_types::{CacheRetention, ThinkingBudgets, ThinkingLevel, Transport};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 const EMBEDDED_MODELS: &str = include_str!("../data/models.json");
+
+/// Scope under which model registrations live in iii state.
+pub const MODELS_SCOPE: &str = "models";
+/// Key prefix for individual model entries: `models:<provider>:<id>`.
+pub const MODELS_KEY_PREFIX: &str = "models:";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Model {
@@ -115,72 +133,119 @@ fn supports_model(m: &Model, capability: Capability) -> bool {
 ///
 /// Functions registered:
 /// - `models::list` — payload `{ provider?, capability? }`, returns
-///   `{ models: [<Model>...] }`
+///   `{ models: [<Model>...] }`. State-first; falls back to the embedded
+///   seed when no `models:` keys are registered.
 /// - `models::get` — payload `{ provider, model_id }`, returns the model
-///   or `null`
+///   or `null`.
 /// - `models::supports` — payload `{ provider, model_id, capability }`,
-///   returns `{ supported: bool }`
+///   returns `{ supported: bool }`.
+/// - `models::register` — payload is a `Model`, writes to state under
+///   `models:<provider>:<id>`. Returns `{ key, registered: true }`.
+///
+/// On registration the embedded baseline is seeded into state once if the
+/// `models:` prefix is empty. Existing setups keep zero-config; new
+/// deployments can clear state and register their own catalog from
+/// scratch.
 pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<ModelsFunctionRefs> {
     use iii_sdk::{IIIError, RegisterFunctionMessage};
     use serde_json::{json, Value};
 
+    let _ = seed_state_if_empty(iii).await;
+
+    let iii_for_list = iii.clone();
     let list_fn = iii.register_function((
         RegisterFunctionMessage::with_id("models::list".to_string())
-            .with_description("List models, optionally filtered by provider or capability.".into()),
-        move |payload: Value| async move {
-            let provider = payload
-                .get("provider")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let capability = payload
-                .get("capability")
-                .and_then(Value::as_str)
-                .and_then(parse_capability);
-            let filter = ListFilter {
-                provider,
-                capability,
-            };
-            let models = list(&filter);
-            serde_json::to_value(json!({ "models": models }))
-                .map_err(|e| IIIError::Handler(e.to_string()))
+            .with_description("List models, optionally filtered by provider or capability. Reads from iii state; falls back to the embedded seed when state is empty.".into()),
+        move |payload: Value| {
+            let iii = iii_for_list.clone();
+            async move {
+                let provider = payload
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let capability = payload
+                    .get("capability")
+                    .and_then(Value::as_str)
+                    .and_then(parse_capability);
+                let filter = ListFilter {
+                    provider,
+                    capability,
+                };
+                let models = list_from_state_or_seed(&iii, &filter).await;
+                serde_json::to_value(json!({ "models": models }))
+                    .map_err(|e| IIIError::Handler(e.to_string()))
+            }
         },
     ));
 
+    let iii_for_get = iii.clone();
     let get_fn = iii.register_function((
         RegisterFunctionMessage::with_id("models::get".to_string())
-            .with_description("Look up a single model by (provider, model_id).".into()),
-        move |payload: Value| async move {
-            let provider = payload
-                .get("provider")
-                .and_then(Value::as_str)
-                .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?;
-            let model_id = payload
-                .get("model_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| IIIError::Handler("missing required field: model_id".into()))?;
-            let model = get(provider, model_id);
-            serde_json::to_value(model).map_err(|e| IIIError::Handler(e.to_string()))
+            .with_description("Look up a single model by (provider, model_id). State-first.".into()),
+        move |payload: Value| {
+            let iii = iii_for_get.clone();
+            async move {
+                let provider = payload
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?
+                    .to_string();
+                let model_id = payload
+                    .get("model_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required field: model_id".into()))?
+                    .to_string();
+                let model = get_from_state_or_seed(&iii, &provider, &model_id).await;
+                serde_json::to_value(model).map_err(|e| IIIError::Handler(e.to_string()))
+            }
         },
     ));
 
+    let iii_for_supports = iii.clone();
     let supports_fn = iii.register_function((
         RegisterFunctionMessage::with_id("models::supports".to_string())
-            .with_description("Check whether a model supports a capability.".into()),
-        move |payload: Value| async move {
-            let provider = payload
-                .get("provider")
-                .and_then(Value::as_str)
-                .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?;
-            let model_id = payload
-                .get("model_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| IIIError::Handler("missing required field: model_id".into()))?;
-            let capability = payload
-                .get("capability")
-                .and_then(Value::as_str)
-                .and_then(parse_capability)
-                .ok_or_else(|| IIIError::Handler("missing or unknown capability".into()))?;
-            Ok(json!({ "supported": supports(provider, model_id, capability) }))
+            .with_description("Check whether a model supports a capability. State-first.".into()),
+        move |payload: Value| {
+            let iii = iii_for_supports.clone();
+            async move {
+                let provider = payload
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required field: provider".into()))?
+                    .to_string();
+                let model_id = payload
+                    .get("model_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| IIIError::Handler("missing required field: model_id".into()))?
+                    .to_string();
+                let capability = payload
+                    .get("capability")
+                    .and_then(Value::as_str)
+                    .and_then(parse_capability)
+                    .ok_or_else(|| IIIError::Handler("missing or unknown capability".into()))?;
+                let supported = get_from_state_or_seed(&iii, &provider, &model_id)
+                    .await
+                    .is_some_and(|m| supports_model(&m, capability));
+                Ok(json!({ "supported": supported }))
+            }
+        },
+    ));
+
+    let iii_for_register = iii.clone();
+    let register_fn = iii.register_function((
+        RegisterFunctionMessage::with_id("models::register".to_string())
+            .with_description("Write a model to iii state under models:<provider>:<id>.".into()),
+        move |payload: Value| {
+            let iii = iii_for_register.clone();
+            async move {
+                let model: Model = serde_json::from_value(payload.clone())
+                    .map_err(|e| IIIError::Handler(format!("invalid Model payload: {e}")))?;
+                let key = format!("{MODELS_KEY_PREFIX}{}:{}", model.provider, model.id);
+                state_set(&iii, &key, &serde_json::to_value(&model).unwrap_or(Value::Null))
+                    .await
+                    .map_err(|e| IIIError::Handler(format!("state::set failed: {e}")))?;
+                Ok(json!({ "key": key, "registered": true }))
+            }
         },
     ));
 
@@ -188,7 +253,126 @@ pub async fn register_with_iii(iii: &iii_sdk::III) -> anyhow::Result<ModelsFunct
         list: list_fn,
         get: get_fn,
         supports: supports_fn,
+        register: register_fn,
     })
+}
+
+/// Seed the embedded baseline into iii state under `models:` if no
+/// `models:` keys exist yet. Idempotent and best-effort: a transient bus
+/// error or already-seeded state both leave the function silent.
+async fn seed_state_if_empty(iii: &iii_sdk::III) -> anyhow::Result<()> {
+    use serde_json::Value;
+    let existing = iii
+        .trigger(iii_sdk::TriggerRequest {
+            function_id: "state::list".to_string(),
+            payload: serde_json::json!({
+                "scope": MODELS_SCOPE,
+                "prefix": MODELS_KEY_PREFIX,
+            }),
+            action: None,
+            timeout_ms: Some(5_000),
+        })
+        .await
+        .ok();
+    let already_seeded = existing
+        .as_ref()
+        .and_then(|v| {
+            v.as_array()
+                .cloned()
+                .or_else(|| v.get("items").and_then(Value::as_array).cloned())
+        })
+        .is_some_and(|items| !items.is_empty());
+    if already_seeded {
+        return Ok(());
+    }
+    for m in CATALOG.iter() {
+        let key = format!("{MODELS_KEY_PREFIX}{}:{}", m.provider, m.id);
+        let _ = state_set(iii, &key, &serde_json::to_value(m).unwrap_or(Value::Null)).await;
+    }
+    Ok(())
+}
+
+async fn state_set(
+    iii: &iii_sdk::III,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), iii_sdk::IIIError> {
+    iii.trigger(iii_sdk::TriggerRequest {
+        function_id: "state::set".to_string(),
+        payload: serde_json::json!({
+            "scope": MODELS_SCOPE,
+            "key": key,
+            "value": value,
+        }),
+        action: None,
+        timeout_ms: Some(5_000),
+    })
+    .await
+    .map(|_| ())
+}
+
+async fn list_from_state_or_seed(iii: &iii_sdk::III, filter: &ListFilter) -> Vec<Model> {
+    use serde_json::Value;
+    let resp = iii
+        .trigger(iii_sdk::TriggerRequest {
+            function_id: "state::list".to_string(),
+            payload: serde_json::json!({
+                "scope": MODELS_SCOPE,
+                "prefix": MODELS_KEY_PREFIX,
+            }),
+            action: None,
+            timeout_ms: Some(5_000),
+        })
+        .await
+        .ok();
+    let items = resp.as_ref().and_then(|v| {
+        v.as_array()
+            .cloned()
+            .or_else(|| v.get("items").and_then(Value::as_array).cloned())
+    });
+    let from_state: Vec<Model> = items
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|it| {
+            let raw = it.get("value").cloned().unwrap_or(it);
+            serde_json::from_value::<Model>(raw).ok()
+        })
+        .collect();
+    let source = if from_state.is_empty() {
+        CATALOG.clone()
+    } else {
+        from_state
+    };
+    source
+        .into_iter()
+        .filter(|m| filter.provider.as_ref().is_none_or(|p| p == &m.provider))
+        .filter(|m| filter.capability.is_none_or(|c| supports_model(m, c)))
+        .collect()
+}
+
+async fn get_from_state_or_seed(
+    iii: &iii_sdk::III,
+    provider: &str,
+    model_id: &str,
+) -> Option<Model> {
+    let key = format!("{MODELS_KEY_PREFIX}{provider}:{model_id}");
+    let resp = iii
+        .trigger(iii_sdk::TriggerRequest {
+            function_id: "state::get".to_string(),
+            payload: serde_json::json!({
+                "scope": MODELS_SCOPE,
+                "key": key,
+            }),
+            action: None,
+            timeout_ms: Some(5_000),
+        })
+        .await
+        .ok();
+    let raw = resp
+        .as_ref()
+        .and_then(|v| v.get("value").cloned().or_else(|| Some(v.clone())));
+    let from_state = raw.and_then(|r| serde_json::from_value::<Model>(r).ok());
+    from_state.or_else(|| get(provider, model_id))
 }
 
 fn parse_capability(s: &str) -> Option<Capability> {
@@ -210,11 +394,12 @@ pub struct ModelsFunctionRefs {
     pub list: iii_sdk::FunctionRef,
     pub get: iii_sdk::FunctionRef,
     pub supports: iii_sdk::FunctionRef,
+    pub register: iii_sdk::FunctionRef,
 }
 
 impl ModelsFunctionRefs {
     pub fn unregister_all(self) {
-        for r in [self.list, self.get, self.supports] {
+        for r in [self.list, self.get, self.supports, self.register] {
             r.unregister();
         }
     }

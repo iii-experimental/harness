@@ -680,8 +680,9 @@ fn register_stream_assistant(iii: &III) {
                             .await
                         {
                             // RoutingDecision: { model, reason, policy_id?, ab_test_id?,
-                            // fallback?, confidence, provider? }. The `provider` field is
-                            // a harness-driven extension to llm-router (see iii-hq/workers#57).
+                            // fallback?, confidence, provider? }. The `provider` field shipped
+                            // upstream in llm-router via iii-hq/workers PR #57 (merged
+                            // 2026-04-29; commit 1117e2eceeb0d8feb9c8157f82b05bf722345d2c).
                             // Resolution rules:
                             //  1. explicit `provider` on the decision wins, with or without
                             //     a `model` (router may swap provider only — e.g. failover);
